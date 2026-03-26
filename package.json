@@ -1,0 +1,16 @@
+{
+  "name": "logoot-plus",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/seed-random": "^2.2.4"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "seed-random": "^2.2.0"
+  }
+}
