@@ -117,6 +117,17 @@ export class Document {
         return op
     }
 
+    del(from: number, to: number) : Operation {
+        const op = localDelete(this, from, to)
+        this.operations.push(op)
+        this.state.localClock++
+        if (this.DEBUG) {
+            console.log("After local delete at site ", this.state.replica, " with operation: ")
+            console.table(this.blocks)
+        }
+        return op
+    }
+
     read() : string {
         let res = ""
         for (let block of this.blocks) {
@@ -134,7 +145,11 @@ export class Document {
                 continue
             }
             this.lastSeen.set(op.site, op.clock)
-            remoteInsert(this, op)
+            if (op.type === 'del') {
+                remoteDelete(this, op)
+            } else {
+                remoteInsert(this, op)
+            }
             if (this.DEBUG) {
                 console.log("After merging operation from site ", op.site.toString(), " with id ", op.ids[0])
                 console.table(this.blocks)
@@ -211,6 +226,24 @@ function findInsertIndex(doc: Document, pos: number) : PosInfo | null {
     }
 }
 
+function findDeleteIndex(doc: Document, pos: number) : PosInfo | null {
+    if (doc.blocks.length == 0) return null
+    let offset = 0
+    for (let i = 0 ; i < doc.blocks.length ; i++) {
+        const block = doc.blocks[i]!
+        if (offset + block.size > pos) {
+            // pos is in this block
+            return {
+                idx: i,
+                offset: offset
+            }
+        }
+        offset += block.size
+    }
+    // pos is at the end of the document, return null since there is nothing to delete
+    return null
+}
+
 /* Returns 1 if id1 > id2, 0 if equal, -1 otherwise */
 function compareIds(id1: Id, id2: Id) : number { 
     const l = Math.min(id1.length, id2.length)
@@ -246,6 +279,32 @@ function searchBlock(doc: Document, id: Id) : number | null {
     const minId = block.base.concat([block.offsets[0]])
     if (compareIds(id, minId) >= 0) return idx  // id is inside this block
     return idx == 0 ? null : idx - 1
+}
+
+function searchBlockContainingId(doc: Document, id: Id) : PosInfo | null {
+    if (doc.blocks.length == 0) throw new Error("Document is empty!")
+    for (let i = 0; i < doc.blocks.length; i++) {
+        const block = doc.blocks[i]!
+        const minId = block.base.concat([block.offsets[0]])
+        const maxId = block.base.concat([block.offsets[1]-1])
+        if (compareIds(id, minId) >= 0 && compareIds(id, maxId) <= 0) {
+            // Find the exact offset of the id in the block
+            let offset = -1
+            for (let j = 0; j < block.size; j++) {
+                const idElem = block.base.concat([block.offsets[0] + j])
+                if (compareIds(idElem, id) == 0) {
+                    offset = j
+                    break
+                }
+            }
+            if (offset == -1) throw new Error("ID not found in the block")
+            return {
+                idx: i,
+                offset: offset
+            }
+        }
+    }
+    return null
 }
 
 function insertNewBlockAtIdx(doc: Document, text: string, idx: number | null, site: number, newId: Id = []) : Operation { 
@@ -515,3 +574,192 @@ function remoteInsert(doc: Document, op: Operation) : void {
     const sp = findSplitPoint(block, id)
     splitAndInsertBlock(doc, idx, sp, text, site, base)
 }
+
+function deleteFromFront(doc: Document, idx: number, n: number) : Id[] {
+    /* Delete n characters from the start of the block at idx */
+    const block = doc.blocks[idx]!
+    if (n > block.size) throw new Error("Number of chars to delete is more than size of the block")
+    block.value = block.value.substring(n)
+    block.size -= n
+    // get delete indices from block 
+    const delIndices : Id[] = []
+    for (let i = 0; i < n; i++) {
+        delIndices.push(block.base.concat([block.offsets[0] + i]))
+    }
+    // update block offsets 
+    block.offsets[0] += n
+    return delIndices
+}
+
+function deleteFromEnd(doc: Document, idx: number, n: number) : Id[] {  
+    /* Delete n characters from the end of the block at idx */
+    const block = doc.blocks[idx]!
+    if (n > block.size) throw new Error("Number of chars to delete is more than size of the block")
+    block.value = block.value.substring(0, block.value.length - n)
+    block.size -= n
+    // get delete indices from block 
+    const delIndices : Id[] = []
+    for (let i = 0; i < n; i++) {
+        delIndices.push(block.base.concat([block.offsets[1] - 1 - i]))
+    }
+    // update block offsets 
+    block.offsets[1] -= n
+    return delIndices
+}
+    
+function deleteAndSplit(doc: Document, idx: number, left: number, n: number) : Id[] {
+    /* Delete n characters from the middle of the block at idx starting from "left" */
+    // Split the block into two blocks 
+    const block = doc.blocks[idx]!
+    if (left + n > block.size) throw new Error("Number of chars to delete is more than size of the block")
+    
+    const block1 : Block = {
+        base: block.base,
+        offsets: [block.offsets[0], block.offsets[0] + left],
+        value: block.value.substring(0, left),
+        size: left,
+        creator: block.creator
+    }
+
+    const block2 : Block = {
+        base: block.base,
+        offsets: [block.offsets[0] + left + n, block.offsets[1]],
+        value: block.value.substring(left + n),
+        size: block.size - left - n,
+        creator: block.creator
+    }
+
+    // get delete indices from block
+    const delIndices : Id[] = []
+    for (let i = 0; i < n; i++) {
+        delIndices.push(block.base.concat([block.offsets[0] + left + i]))
+    }
+    
+    doc.blocks.splice(idx, 1, block1, block2)
+
+    return delIndices
+}
+
+// from is inclusive, to is exclusive
+function localDelete(doc: Document, from: number, to: number) : Operation {
+    /* Collect all the IDs of the elements to be deleted */
+    // Cases: 
+    // 1. The entire block needs to be deleted 
+    // 2. We are deleting at the end of the block
+    // 3. We are deleting at the start of the block
+    // 4. We are deleting in the middle of the block 
+    // Find the index of "from"
+    let numDelete = to - from
+    let delIndices : Id[] = []
+
+    while (numDelete > 0) {
+        const posInfo = findDeleteIndex(doc, from)
+        if (posInfo == null) {
+            throw new Error("Cannot delete from an empty document")
+        }
+
+        let { idx, offset } = posInfo
+        let startDel = from - offset 
+        let endDel = to - offset 
+
+        let indices : Id[] = []
+        const blockSize = doc.blocks[idx]!.size        
+
+        if (startDel == 0 && endDel >= blockSize) {
+            // Case 1: If the entire block needs to be deleted
+            // Delete the block 
+            // Collect all indices corresponding to this block
+            const block = doc.blocks[idx]!
+            for (let i = 0; i < blockSize; i++) {
+                indices.push(block.base.concat([block.offsets[0] + i]))
+            }
+            delIndices = delIndices.concat(indices)
+            numDelete -= blockSize
+            from += blockSize
+            doc.blocks.splice(idx, 1)
+        }
+        else if (startDel == 0) {
+            // Case 2: We are deleting some chars from the start of the block 
+            indices = deleteFromFront(doc, idx, numDelete)
+            delIndices = delIndices.concat(indices)
+            numDelete = 0
+        }
+        else if (endDel >= doc.blocks[idx]!.size) {
+            // Case 3: We are deleting at the end of the block
+            indices = deleteFromEnd(doc, idx, blockSize - startDel)
+            delIndices = delIndices.concat(indices)
+            // Verification 
+            assert(indices.length == blockSize - startDel, "Deleted indices length should be equal to number of chars deleted")
+            numDelete -= blockSize - startDel
+            from += delIndices.length
+        } else {
+            // Case 4: We are deleting in the middle of the block, split the block into two and delete the middle part
+            indices = deleteAndSplit(doc, idx, startDel, numDelete)
+            delIndices = delIndices.concat(indices)
+            numDelete = 0
+        }
+    }
+
+    return {
+        type : 'del',
+        ids: delIndices,
+        offsets: [],
+        payload: null,
+        site: doc.state.replica,
+        clock: doc.state.localClock
+    }
+}
+
+function remoteDelete(doc: Document, op: Operation) : void {
+    if (op.type !== 'del') throw new Error("Expected a delete operation")
+    
+    const delIds = op.ids
+
+    /* Naive version of delete for now -- search each identifier one by one */ 
+    for (let id of delIds) {
+        const posInfo = searchBlockContainingId(doc, id)
+        if (posInfo === null) return 
+
+        const { idx, offset } = posInfo
+        const block = doc.blocks[idx]!
+        const minId = block.base.concat([block.offsets[0]])
+        const maxId = block.base.concat([block.offsets[1]-1])
+
+        if (compareIds(id, minId) == 0) {
+            deleteFromFront(doc, idx, 1)
+            if (block.size == 0) {
+                doc.blocks.splice(idx, 1)
+            }
+        } else if (compareIds(id, maxId) == 0) {
+            deleteFromEnd(doc, idx, 1)
+            if (block.size == 0) {
+                doc.blocks.splice(idx, 1)
+            }
+        } else {
+            // ID is in the middle of the block, split the block and delete the middle part
+            deleteAndSplit(doc, idx, offset, 1)
+        }
+    }
+}
+
+// // Simple tests 
+
+// let doc1 = new Document(0)
+// let doc2 = new Document(1)
+
+// doc1.ins(0, "hi")
+// doc1.mergeFrom(doc2)
+// doc2.mergeFrom(doc1)
+
+// // Delete tests 
+// doc1.del(1,2)
+// doc1.ins(1, "ello")
+// doc2.ins(2, "world")
+
+// doc1.mergeFrom(doc2)
+// doc2.mergeFrom(doc1)
+
+// assert.deepEqual(doc1.snapshot, doc2.snapshot)
+
+// console.log("Tests passed!")
+// console.log("Final document state: ", doc1.read())
