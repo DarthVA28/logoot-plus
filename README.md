@@ -8,10 +8,18 @@ This is an implementation of a collaborative text editor using Collaborative Rep
 bun install
 ```
 
-To run:
+## Running the Editor
 
 ```bash
-bun run index.ts
+bun build editor.ts --outfile=bundle.js --target=browser
 ```
 
-This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+Then open `index.html` in the browser of your choice
+
+## Fuzz Testing
+
+For testing using fuzzer:
+
+```bash
+bun run fuzzer.ts
+```

@@ -1,6 +1,6 @@
 import SeedRandom from "seed-random";
 import assert from 'node:assert/strict'
-import { Document } from "./index.js";
+import { Document } from "./logoot.js";
 
 function fuzzer(seed: number) {
   const random = SeedRandom(`${seed}`)
