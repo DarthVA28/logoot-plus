@@ -1,6 +1,8 @@
 # logoot-plus
 
-To install dependencies:
+This is an implementation of a collaborative text editor using Collaborative Replicated Datatypes (CRDTs). We use the LogootSplit algorithm, which is an optimized version of Logoot which supports *adaptive granularity* of the CRDT elements. 
+
+## Setting up the project
 
 ```bash
 bun install
