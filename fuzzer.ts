@@ -38,14 +38,14 @@ function fuzzer(seed: number) {
 
       if (len === 0 || randBool(insertWeight)) {
         // Insert
-        const strlen = randPosInt(3)
+        const strlen = randPosInt(10)
         const content = [...Array(strlen)].map(randChar).join('')
         const pos = randInt(len + 1)
         doc.ins(pos, content)
       } else {
         // delete
         const from = randInt(len)
-        const to = from + randInt(Math.min(len - from, 3))
+        const to = from + randInt(Math.min(len - from, 10))
         doc.del(from, to)
       }
     }

@@ -664,7 +664,7 @@ function localDelete(doc: Document, from: number, to: number) : Operation {
     while (numDelete > 0) {
         const posInfo = findDeleteIndex(doc, from)
         if (posInfo == null) {
-            throw new Error("Cannot delete from an empty document")
+            throw new Error("Tried to delete index " + from + " which is out of bounds " + "currently doc has blocks: " + doc.blocks.length)
         }
 
         let { idx, offset } = posInfo
