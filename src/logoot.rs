@@ -2,6 +2,8 @@
 An implementation of the Logoot CRDT for collaborative text editing.
 */
 
+mod blocktree;
+
 use std::{collections::HashMap, iter, u32::MIN, vec};
 
 use rand::RngExt;
