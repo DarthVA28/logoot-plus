@@ -42,31 +42,6 @@ class InfiniteIterator<T> {
     }
 }
 
-/* Generates a new base between idLow and idHigh */
-function generateBase(idLow : Id, idHigh : Id, state: State) : Id {
-    let low = new InfiniteIterator(idLow, MIN_VALUE)
-    let high = new InfiniteIterator(idHigh, MAX_VALUE)
-
-    const newBase : Id = []
-
-    let l = low.next()
-    let h = high.next()
-
-    while (h-l < 2) {
-        newBase.push(l)
-        l = low.next()
-        h = high.next()
-    }
-
-    // random character between MIN_VALUE and MAX_VALUE
-    const nxt = l + 1 + Math.floor(random() * (h - l - 1))
-    newBase.push(nxt)
-    newBase.push(state.replica)
-    newBase.push(state.localClock)
-
-    return newBase
-}
-
 type Operation = {
     type: 'add' | 'del'
     ids: Id[] 
@@ -198,6 +173,32 @@ type PosInfo = {
     idx : number, 
     offset: number
 }
+
+/* Generates a new base between idLow and idHigh */
+function generateBase(idLow : Id, idHigh : Id, state: State) : Id {
+    let low = new InfiniteIterator(idLow, MIN_VALUE)
+    let high = new InfiniteIterator(idHigh, MAX_VALUE)
+
+    const newBase : Id = []
+
+    let l = low.next()
+    let h = high.next()
+
+    while (h-l < 2) {
+        newBase.push(l)
+        l = low.next()
+        h = high.next()
+    }
+
+    // random character between MIN_VALUE and MAX_VALUE
+    const nxt = l + 1 + Math.floor(random() * (h - l - 1))
+    newBase.push(nxt)
+    newBase.push(state.replica)
+    newBase.push(state.localClock)
+
+    return newBase
+}
+
 
 /* Count number of items you can insert between two IDs */
 function numInsertable(idInsert: Id, idNext: Id, length: number) : number {

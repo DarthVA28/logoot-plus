@@ -1,0 +1,11 @@
+[package]
+name = "logoot-plus"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/logoot.rs"
+
+[dependencies]
+rand = "0.10.0"
+
