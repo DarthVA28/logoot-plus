@@ -2,17 +2,18 @@
 An implementation of the Logoot CRDT for collaborative text editing.
 */
 
-mod blocktree;
+pub mod blocktree;
+pub mod identifiers;
 
-use std::{collections::HashMap, iter, u32::MIN, vec};
+use crate::identifiers::{Id, Range, get_combined_id};
+use crate::blocktree::{BlockTree, BlockNode};
+
+use std::{collections::HashMap};
 
 use rand::RngExt;
 
 const MIN_VALUE: u32 = 0;
 const MAX_VALUE: u32 = 50;
-
-type Id = Vec<u32>; 
-type Range = (u32, u32);
 
 struct State { 
     local_clock: u32, 
@@ -45,28 +46,18 @@ enum OperationType {
     Insert,
     Delete
 }   
-
 struct Operation { 
     op_type: OperationType,
     ids: Vec<Id>,
-    offsets: Vec<usize>,
+    offsets: Vec<u32>,
     payload: Option<String>,
     site: u32, 
     clock: u32
 }
 
-struct Block {
-    base: Id,
-    range: Range,
-    value: String,
-    size: usize,
-    creator: u32
-}
-
 struct Document { 
-    blocks: Vec<Block>,
+    blocks: BlockTree,
     state: State,
-    // TODO::: Clear performance bottleneck: we compute hash of Ids which is an array
     used_ranges_for_id: HashMap<Id, Range>,
     snapshot: String,
     operations: Vec<Operation>, 
@@ -77,7 +68,7 @@ struct Document {
 impl Document {
     fn new(id: u32) -> Self {
         Document {
-            blocks: Vec::new(),
+            blocks: BlockTree::new(),
             state: State { local_clock: 0, replica: id },
             used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
@@ -98,8 +89,8 @@ impl Document {
 
     fn read(&self) -> String {
         let mut res = String::new();
-        for block in &self.blocks {
-            res.push_str(&block.value);
+        for block in self.blocks.inorder_iter() {
+            res.push_str(&block.content());
         }
         res
     }
@@ -127,7 +118,6 @@ enum PosInfo {
     Found(Position), 
     NotFound
 }
-
 
 /* Generate a new base between idLow and idHigh */
 fn generate_base(id_low: &Id, id_high: &Id, state: &State) -> Id {
@@ -165,6 +155,124 @@ fn num_insertable(id_insert: &Id, id_next: &Id, length: u32) -> u32 {
     id_next[l] - id_insert[l] - 1
 }
 
+fn extend_block(doc: &mut Document, text:String, block: usize, path: &Vec<usize>, site: u32) -> Operation {
+    // Check if we can extend the block without clashing with the next block 
+    let next = doc.blocks.next(block, path);
+    let insert_base = doc.blocks.base_id(block);
+    let insert_offsets = doc.blocks.ranges(block);
+
+    if !next.is_none() {
+        let text_len = text.chars().count() as u32;
+        let nxt_block = next.unwrap();
+        // Get bases and offsets for the block and the next block
+        let next_base = doc.blocks.base_id(nxt_block);
+        let next_offsets: (u32, u32) = doc.blocks.ranges(nxt_block);
+        // Get final IDs
+        let id_insert = get_combined_id(insert_base, insert_offsets.1);
+        let id_next = get_combined_id(next_base, next_offsets.0);
+        let n = num_insertable(&id_insert, &id_next, text_len);
+        if n < text_len {
+            // Cannot extend the block without clashing with the next block
+            // Insert n chars here and then insert a new block
+            // Remaining text to be inserted in a new block
+            // Get substring n..
+            // let rest = text.chars().skip(n as usize).collect::<String>();
+            // doc.blocks.extend_content(block, &text); 
+            let id_low = get_combined_id(insert_base, insert_offsets.1 + n);
+            let id_high = get_combined_id(next_base, next_offsets.0);
+            return insert_new_block(doc, &id_low, &id_high, text, site);   
+        }
+    }
+    doc.blocks.extend_content(block, &text);
+    return Operation 
+    { op_type: OperationType::Insert, 
+        ids: vec![doc.blocks.base_id(block).clone()], 
+        offsets: vec![insert_offsets.1], 
+        payload: Some(text), 
+        site: site, 
+        clock: doc.state.local_clock 
+    }
+}
+
+fn insert_new_block(doc: &mut Document, idLow: &Id, idHigh: &Id, text: String, site: u32) -> Operation {
+    let base = generate_base(idLow, idHigh, &doc.state);
+    let size = text.chars().count() as u32;
+    let base_block = doc.blocks.create_base_block(base.clone(), (0, size), site);
+    doc.blocks.insert(text.clone(), base_block, 0);
+    return Operation 
+    { op_type: OperationType::Insert, 
+        ids: vec![base], 
+        offsets: vec![0], 
+        payload: Some(text), 
+        site: site, 
+        clock: doc.state.local_clock 
+    }
+}
+
+fn split_and_insert_block(doc: &mut Document, text: String, block: usize, path: &Vec<usize>, sp: u32, site: u32) -> Operation {
+    // sp is the split point 
+    let base = doc.blocks.base(block);
+    let offsets = doc.blocks.ranges(block);
+
+    // Create 2 new blocks with the content split at sp 
+    let content = doc.blocks.content(block);
+    let lcontent = content.chars().take(sp as usize).collect::<String>();
+    let rcontent = content.chars().skip(sp as usize).collect::<String>();
+    
+    let res = doc.blocks.delete(base, 0);
+    if res.is_err() {
+        panic!("Error deleting block during split");
+    }
+
+    doc.blocks.insert(lcontent, base, offsets.0);
+    doc.blocks.insert(rcontent, base, offsets.0 + sp);
+
+    // Insert the new block in between
+    let base_id = doc.blocks.base_id(block);
+    let id_low = get_combined_id(base_id, offsets.0 + sp-1);
+    let id_high = get_combined_id(base_id, offsets.0 + sp);
+
+    let new_id = generate_base(&id_low, &id_high, &doc.state);
+    let new_base_block = doc.blocks.create_base_block(new_id.clone(), (0, text.chars().count() as u32), site);
+    doc.blocks.insert(text.clone(), new_base_block, 0);
+    
+    return Operation 
+    { op_type: OperationType::Insert, 
+        ids: vec![new_id], 
+        offsets: vec![0], 
+        payload: Some(text), 
+        site: site, 
+        clock: doc.state.local_clock 
+     }
+}
+
+fn local_insert(doc: &mut Document, pos: u32, text: String) -> Operation {
+    // Invariant: Size of text passed to the localInsert is less than MAXVALUE 
+    assert!(text.chars().count() as u32 <= MAX_VALUE);
+
+    let p = doc.blocks.find_by_position(pos);
+    if p.is_none() {
+        // Document is empty
+        return insert_new_block(doc, &vec![], &vec![], text, doc.state.replica);
+    }
+
+    let path = p.unwrap();
+    let block = path.last().expect("Path should not be empty");
+
+    // If we are inserting at the end of the block 
+    // And we are the creator and the block endpoint is maximal 
+    if (pos == doc.blocks.left_count(Some(*block)) + doc.blocks.size(Some(*block))) {
+       if (doc.blocks.creator(*block) == doc.state.replica) {
+            // Check if the offset is maximal for the block 
+            let block_ranges = doc.blocks.ranges(*block);
+            let base_ranges = doc.blocks.base_offsets(*block);
+            if block_ranges.1 == base_ranges.1 {
+                // We can extend this block 
+            }
+       }
+    }
+    todo!()
+}
 
 // #[cfg(test)]
 // mod tests {
