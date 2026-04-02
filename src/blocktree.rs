@@ -1,7 +1,7 @@
 /* 
 An implementation of Block Trees in the form of AVL Trees
 */
-use std::{cmp::Ordering, path};
+use std::cmp::Ordering;
 use crate::identifiers::{Id, Range}; 
 
 fn cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
@@ -256,7 +256,7 @@ impl BlockTree {
             // Update its children 
             if i+1 < path_len { 
                 let old_child = path_to_root[i+1];
-                if (node.left == Some(old_child)) {
+                if node.left == Some(old_child) {
                     self.nodes[idx].left = Some(curr);
                 } else { 
                     self.nodes[idx].right = Some(curr);
@@ -532,7 +532,7 @@ impl<'a> Iterator for InOrderIter<'a> {
 }
 
 impl BlockTree {
-    pub fn inorder_iter(&self) -> InOrderIter {
+    pub fn inorder_iter(&self) -> InOrderIter<'_> {
         InOrderIter::new(self)
     }
 }

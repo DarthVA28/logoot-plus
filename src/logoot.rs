@@ -8,7 +8,6 @@ pub mod identifiers;
 use crate::identifiers::{Id, Range, get_combined_id};
 use crate::blocktree::{BlockTree, DelLocation};
 
-use core::num;
 use std::{collections::HashMap};
 
 use rand::RngExt;
@@ -61,7 +60,7 @@ impl Document {
         self.state.local_clock += 1;
     }
 
-    pub fn del(&mut self, from: u32, to: u32) -> Operation {
+    pub fn del(&mut self, _from: u32, _to: u32) -> Operation {
         // TODO
         todo!()
     }
@@ -115,7 +114,7 @@ fn generate_base(id_low: &Id, id_high: &Id, state: &State) -> Id {
     let mut l = low_iter.next().unwrap_or(&MIN_VALUE);
     let mut h = high_iter.next().unwrap_or(&MAX_VALUE);
 
-    while (h-l < 2) {
+    while h-l < 2 {
         base.push(*l);
         l = low_iter.next().unwrap_or(&MIN_VALUE);
         h = high_iter.next().unwrap_or(&MAX_VALUE);
@@ -194,7 +193,7 @@ fn insert_new_block(doc: &mut Document, id_low: &Id, id_high: &Id, text: String,
     }
 }
 
-fn split_and_insert_block(doc: &mut Document, text: String, block: usize, path: &Vec<usize>, sp: u32, site: u32) -> Operation {
+fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Vec<usize>, sp: u32, site: u32) -> Operation {
     // sp is the split point 
     let base = doc.blocks.base(block);
     let base_id = doc.blocks.base_id(block).clone();
@@ -376,10 +375,10 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     split_and_insert_block(doc, text.clone(), block, &path, sp, site);
 }
 
-fn delete_and_split(doc: &mut Document, block: usize, path: &Vec<usize>, left: u32, n: u32) {
+fn delete_and_split(doc: &mut Document, block: usize, _path: &Vec<usize>, left: u32, n: u32) {
     // Prepare the 2 blocks after the split 
     let base = doc.blocks.base(block);
-    let base_id = doc.blocks.base_id(block).clone();
+    let _base_id = doc.blocks.base_id(block).clone();
     let offsets = doc.blocks.ranges(block);
 
     let content = doc.blocks.content(block);
@@ -409,7 +408,7 @@ fn local_delete(doc: &mut Document, from: u32, to: u32) -> Operation {
 
     let mut curr = from;
 
-    while (num_delete > 0) {
+    while num_delete > 0 {
         let path = doc.blocks.find_by_position(curr);
         if path.is_empty() {
             panic!("Cannot delete from an empty document");
@@ -447,7 +446,7 @@ fn local_delete(doc: &mut Document, from: u32, to: u32) -> Operation {
             indices.push((base_id.clone(), del_offsets));
             doc.blocks.truncate_content(block, num_delete, DelLocation::Start, &path);
             num_delete = 0;
-        } else if (end_del >= block_size) {
+        } else if end_del >= block_size {
             // Case 3: delete some chars from the end of the block
             // for i in start_del..block_size {
             //     indices.push(base_id.clone());
