@@ -1,18 +1,18 @@
 /* 
 An implementation of Block Trees in the form of AVL Trees
 */
-use std::{cmp::Ordering};
+use std::{cmp::Ordering, path};
 use crate::identifiers::{Id, Range}; 
 
-fn cmp_key(node_base: &Id, node_offset: u32, search_base: &Id,search_offset: u32, node_size: u32) -> Ordering {
-    match node_base.cmp(search_base) {
+fn cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
+    match search_base.cmp(node_base) {
         Ordering::Less => Ordering::Less,
         Ordering::Greater => Ordering::Greater,
         Ordering::Equal => {
             if search_offset < node_offset {
-                Ordering::Greater // go left
+                Ordering::Less // go left
             } else if search_offset >= node_offset + node_size {
-                Ordering::Less 
+                Ordering::Greater 
             } else {
                 Ordering::Equal 
             }
@@ -60,6 +60,11 @@ pub struct BlockTree {
     free_list: Vec<usize>
 }
 
+pub enum DelLocation {
+    Start, 
+    End
+}
+
 impl BlockTree { 
     pub fn new() -> Self { 
         BlockTree { root: None, nodes: Vec::new(), free_list: Vec::new(), base_blocks: Vec::new() }
@@ -104,7 +109,9 @@ impl BlockTree {
     }
 
     pub fn left_count(&self, node: Option<usize>) -> u32 { 
-        node.map_or(0, |index| self.nodes[index].count)
+        if node.is_none() { return 0; }
+        let left= self.nodes[node.unwrap()].left;
+        left.map_or(0, |index| self.nodes[index].count)
     }
 
     pub fn creator(&self, node: usize) -> u32 { 
@@ -135,12 +142,38 @@ impl BlockTree {
         (base_left, base_right)
     }
 
-    pub fn extend_content(&mut self, node: usize, text: &str) {
+    pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);
         let added_size = text.chars().count() as u32;
         node.size += added_size;
-        node.count += added_size;
+        for idx in path_to_root.iter().rev() {
+            self.update_node(*idx);
+        }
+    }
+
+    pub fn truncate_content(&mut self, node: usize, num_delete: u32, location: DelLocation, path_to_root: &[usize]) {
+        let node = &mut self.nodes[node];
+        let content_len = node.content.chars().count() as u32;
+        match location {
+            DelLocation::Start => {
+                let new_content: String = node.content.chars().skip(num_delete as usize).collect();
+                node.content = new_content;
+            }
+            DelLocation::End => {
+                let new_content: String = node.content.chars().take((content_len - num_delete) as usize).collect();
+                node.content = new_content;
+            }
+        }
+        node.size -= num_delete;
+        // update offsets 
+        node.offset = match location {
+            DelLocation::Start => node.offset + num_delete,
+            DelLocation::End => node.offset
+        };
+        for idx in path_to_root.iter().rev() {
+            self.update_node(*idx);
+        }
     }
 
     fn update_node(&mut self, idx: usize) {
@@ -218,7 +251,7 @@ impl BlockTree {
 
         for i in (0..path_to_root.len()).rev() {
             let idx = path_to_root[i];
-            let node = &self.nodes[i];
+            let node = &self.nodes[idx];
 
             // Update its children 
             if i+1 < path_len { 
@@ -231,10 +264,11 @@ impl BlockTree {
             }
             curr = self.avl_fix(idx);
         }
+        self.root = Some(curr);
     }
  
     /* Find block by position function */
-    pub fn find_by_position(&self, pos: u32) -> Option<Vec<usize>> { 
+    pub fn find_by_position(&self, pos: u32) -> Vec<usize> { 
         let mut path_to_root: Vec<usize> = vec![]; 
         let nodes = &self.nodes;
         let mut i = self.root;
@@ -251,17 +285,18 @@ impl BlockTree {
             if curr < left_count {
                 i = left;
             } else if curr < left_count + node.size {
-                return Some(path_to_root);
+                return path_to_root;
             } else { 
                 curr -= left_count + node.size;
                 i = node.right;
             }
         }
-        None
+        path_to_root
     }
 
     /* Find block by ID function */ 
-    pub fn find_by_id(&self, base: &Id, offset: u32) -> Option<Vec<usize>> { 
+    pub fn find_by_id(&self, base: &Id, offset: u32) -> Vec<usize> {
+        if self.root.is_none() { return vec![]; } 
         let mut path_to_root: Vec<usize> = vec![];
         let nodes = &self.nodes;
         let mut i = self.root;  
@@ -271,13 +306,15 @@ impl BlockTree {
             // Check if bases match and offset is contained 
             let base_block = &self.base_blocks[node.base];
             let node_base = &base_block.base;
-            match cmp_key(node_base, node.offset, base, offset, node.size) { 
+            match cmp_key(base, offset, node_base, node.offset, node.size) { 
                 Ordering::Less => i = node.left,
                 Ordering::Greater => i = node.right,
-                Ordering::Equal => return Some(path_to_root)
+                Ordering::Equal => return path_to_root
             }
         }
-        None
+        path_to_root
+        // // CHECK THIS 
+        // return vec![];
     }
 
     /* Public function to create a new base block */
@@ -311,7 +348,7 @@ impl BlockTree {
             let node_right = node.right;
             let node_base_id = &self.base_blocks[node_base].base;
 
-            match cmp_key(node_base_id, node_offset, search_id, offset, node_size) {
+            match cmp_key(search_id, offset, node_base_id, node_offset, node_size) {
                 Ordering::Less => {
                     if node.left.is_none() {
                         node.left = Some(idx);
@@ -361,7 +398,8 @@ impl BlockTree {
     
     pub fn delete(&mut self, base_id: usize, offset: u32) -> Result<(), String> {
         let base = &self.base_blocks[base_id].base;
-        if let Some(path) = self.find_by_id(base, offset) {
+        let path = self.find_by_id(base, offset);
+        if !path.is_empty() {
             let target = *path.last().unwrap();
             let target_node = &self.nodes[target];
             let left = target_node.left;
@@ -499,3 +537,187 @@ impl BlockTree {
     }
 }
 
+/* Testing */
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::identifiers::{Id, Range};
+
+//     fn make_id(x: u32) -> Id {
+//         vec![x]
+//     }
+
+//     fn check_avl(tree: &BlockTree, node: Option<usize>) -> (i32, u32) {
+//         if let Some(idx) = node {
+//             let n = &tree.nodes[idx];
+
+//             let (lh, lc) = check_avl(tree, n.left);
+//             let (rh, rc) = check_avl(tree, n.right);
+
+//             // Height correctness
+//             assert_eq!(n.height, 1 + lh.max(rh));
+
+//             // AVL balance
+//             assert!((rh - lh).abs() <= 1, "AVL violated at node {}", idx);
+
+//             // Count correctness
+//             assert_eq!(n.count, n.size + lc + rc);
+
+//             (n.height, n.count)
+//         } else {
+//             (0, 0)
+//         }
+//     }
+
+//     fn collect_inorder(tree: &BlockTree) -> Vec<(usize, u32, String)> {
+//         tree.inorder_iter()
+//             .map(|n| (n.base, n.offset, n.content.clone()))
+//             .collect()
+//     }
+
+//     #[test]
+//     fn test_basic_insert_inorder() {
+//         let mut tree = BlockTree::new();
+
+//         let b0 = tree.create_base_block(make_id(1), (0, 100), 0);
+
+//         tree.insert("A".into(), b0, 10);
+//         tree.insert("B".into(), b0, 20);
+//         tree.insert("C".into(), b0, 30);
+
+//         let inorder = collect_inorder(&tree);
+
+//         assert_eq!(inorder.len(), 3);
+//         assert_eq!(inorder[0].1, 10);
+//         assert_eq!(inorder[1].1, 20);
+//         assert_eq!(inorder[2].1, 30);
+
+//         check_avl(&tree, tree.root);
+//     }
+
+//     #[test]
+//     fn test_find_by_position() {
+//         let mut tree = BlockTree::new();
+//         let b = tree.create_base_block(make_id(1), (0, 100), 0);
+
+//         tree.insert("hello".into(), b, 0);   // len 5
+//         tree.insert("world".into(), b, 5);   // len 5
+
+//         // pos inside first block
+//         let path = tree.find_by_position(2);
+//         let node = *path.last().unwrap();
+//         assert_eq!(tree.content(node), "hello");
+
+//         // pos inside second block
+//         let path = tree.find_by_position(7);
+//         let node = *path.last().unwrap();
+//         assert_eq!(tree.content(node), "world");
+
+//         check_avl(&tree, tree.root);
+//     }
+
+//     #[test]
+//     fn test_find_by_id() {
+//         let mut tree = BlockTree::new();
+//         let b = tree.create_base_block(make_id(42), (0, 100), 0);
+
+//         tree.insert("abc".into(), b, 10);
+
+//         let id = tree.base_blocks[b].base.clone();
+//         let path = tree.find_by_id(&id, 10);
+
+//         assert!(!path.is_empty());
+//         let node = *path.last().unwrap();
+//         assert_eq!(tree.content(node), "abc");
+//     }
+
+//     #[test]
+//     fn test_next_prev() {
+//         let mut tree = BlockTree::new();
+//         let b = tree.create_base_block(make_id(1), (0, 100), 0);
+
+//         tree.insert("A".into(), b, 10);
+//         tree.insert("B".into(), b, 20);
+//         tree.insert("C".into(), b, 30);
+
+//         let id = tree.base_blocks[b].base.clone();
+//         let path = tree.find_by_id(&id, 20);
+//         let node = *path.last().unwrap();
+
+//         let next = tree.next(node, &path).unwrap();
+//         assert_eq!(tree.content(next), "C");
+
+//         let prev = tree.prev(node, &path).unwrap();
+//         assert_eq!(tree.content(prev), "A");
+//     }
+
+//     #[test]
+//     fn test_delete_cases() {
+//         let mut tree = BlockTree::new();
+//         let b = tree.create_base_block(make_id(1), (0, 100), 0);
+
+//         // build tree
+//         tree.insert("A".into(), b, 10);
+//         tree.insert("B".into(), b, 20);
+//         tree.insert("C".into(), b, 30);
+
+//         // delete leaf
+//         tree.delete(b, 30).unwrap();
+
+//         // delete node with one child
+//         tree.delete(b, 20).unwrap();
+
+//         // delete root
+//         tree.delete(b, 10).unwrap();
+
+//         assert!(tree.is_empty());
+
+//         check_avl(&tree, tree.root);
+//     }
+
+//     #[test]
+//     fn test_random_stress() {
+//         use rand::RngExt;
+
+//         // let mut rng = rand::make_rng();
+//         let mut tree = BlockTree::new();
+
+//         let b = tree.create_base_block(make_id(1), (0, 10_000), 0);
+
+//         let mut offsets = vec![];
+
+//         // insert random blocks
+//         for _ in 0..200 {
+//             let offset = rand::rng().random_range
+//             (0..10_000);
+
+//             // avoid duplicates
+//             if offsets.contains(&offset) {
+//                 continue;
+//             }
+
+//             offsets.push(offset);
+//             tree.insert("x".into(), b, offset);
+//         }
+
+//         // sort ground truth
+//         offsets.sort();
+
+//         let inorder: Vec<u32> = tree
+//             .inorder_iter()
+//             .map(|n| n.offset)
+//             .collect();
+
+//         assert_eq!(offsets, inorder);
+
+//         // validate AVL + counts
+//         check_avl(&tree, tree.root);
+
+//         // random deletions
+//         for offset in offsets.iter().take(50) {
+//             tree.delete(b, *offset).unwrap();
+//             check_avl(&tree, tree.root);
+//         }
+//     }
+// }
