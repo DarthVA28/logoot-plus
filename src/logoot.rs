@@ -60,9 +60,10 @@ impl Document {
         self.state.local_clock += 1;
     }
 
-    pub fn del(&mut self, _from: u32, _to: u32) -> Operation {
-        // TODO
-        todo!()
+    pub fn del(&mut self, _from: u32, _to: u32) {
+        let op = local_delete(self, _from, _to);
+        self.operations.push(op);
+        self.state.local_clock += 1;
     }
 
     pub fn read(&self) -> String {
@@ -93,16 +94,6 @@ impl Document {
         self.operations.clear();
         self.last_seen.clear();
     }
-}
-
-struct Position {
-    idx: usize,
-    offset: usize 
-}
-
-enum PosInfo { 
-    Found(Position), 
-    NotFound
 }
 
 /* Generate a new base between idLow and idHigh */
