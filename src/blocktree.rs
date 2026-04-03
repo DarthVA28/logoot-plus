@@ -1,10 +1,26 @@
 /* 
 An implementation of Block Trees in the form of AVL Trees
 */
-use std::cmp::Ordering;
+use std::{cmp::Ordering, path};
 use crate::identifiers::{Id, Range}; 
 
-fn cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
+fn search_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
+    match search_base.cmp(node_base) {
+        Ordering::Less => Ordering::Less,
+        Ordering::Greater => Ordering::Greater,
+        Ordering::Equal => {
+            if search_offset < node_offset {
+                Ordering::Less // go left
+            } else if search_offset > node_offset + node_size {
+                Ordering::Greater 
+            } else {
+                Ordering::Equal 
+            }
+        }
+    }
+}
+
+fn ins_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
     match search_base.cmp(node_base) {
         Ordering::Less => Ordering::Less,
         Ordering::Greater => Ordering::Greater,
@@ -47,16 +63,18 @@ impl BlockNode {
     }
 }
 
+#[derive(Clone)]
 pub struct BaseBlock { 
     base: Id,
     range: Range,
     creator: u32
 }
 
+#[derive(Clone)]
 pub struct BlockTree { 
     nodes: Vec<BlockNode>,
     base_blocks: Vec<BaseBlock>,
-    root: Option<usize>, 
+    pub root: Option<usize>, 
     free_list: Vec<usize>
 }
 
@@ -256,7 +274,7 @@ impl BlockTree {
             // Update its children 
             if i+1 < path_len { 
                 let old_child = path_to_root[i+1];
-                if node.left == Some(old_child) {
+                if (node.left == Some(old_child)) {
                     self.nodes[idx].left = Some(curr);
                 } else { 
                     self.nodes[idx].right = Some(curr);
@@ -268,11 +286,12 @@ impl BlockTree {
     }
  
     /* Find block by position function */
-    pub fn find_by_position(&self, pos: u32) -> Vec<usize> { 
+    pub fn find_by_position(&self, pos: u32) -> (Vec<usize>, u32) { 
         let mut path_to_root: Vec<usize> = vec![]; 
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
+        let mut covered: u32 = 0;
         while let Some(index) = i { 
             let node: &BlockNode = &nodes[index];
             path_to_root.push(index);
@@ -285,13 +304,15 @@ impl BlockTree {
             if curr < left_count {
                 i = left;
             } else if curr < left_count + node.size {
-                return path_to_root;
+                covered += left_count;
+                return (path_to_root, covered);
             } else { 
                 curr -= left_count + node.size;
+                covered += left_count + node.size;
                 i = node.right;
             }
         }
-        path_to_root
+        (path_to_root, covered)
     }
 
     /* Find block by ID function */ 
@@ -306,7 +327,7 @@ impl BlockTree {
             // Check if bases match and offset is contained 
             let base_block = &self.base_blocks[node.base];
             let node_base = &base_block.base;
-            match cmp_key(base, offset, node_base, node.offset, node.size) { 
+            match search_cmp_key(base, offset, node_base, node.offset, node.size) { 
                 Ordering::Less => i = node.left,
                 Ordering::Greater => i = node.right,
                 Ordering::Equal => return path_to_root
@@ -348,7 +369,7 @@ impl BlockTree {
             let node_right = node.right;
             let node_base_id = &self.base_blocks[node_base].base;
 
-            match cmp_key(search_id, offset, node_base_id, node_offset, node_size) {
+            match ins_cmp_key(search_id, offset, node_base_id, node_offset, node_size) {
                 Ordering::Less => {
                     if node.left.is_none() {
                         node.left = Some(idx);
@@ -365,6 +386,7 @@ impl BlockTree {
                 }
                 Ordering::Equal => {
                     // This should not happen in a well-formed tree
+                    println!("Tried to insert duplicate block with base {:?} and offset {}", search_id, offset);
                     panic!("Duplicate block ID detected during insertion");
                 }
             }
@@ -532,8 +554,71 @@ impl<'a> Iterator for InOrderIter<'a> {
 }
 
 impl BlockTree {
-    pub fn inorder_iter(&self) -> InOrderIter<'_> {
+    pub fn inorder_iter(&self) -> InOrderIter {
         InOrderIter::new(self)
+    }
+}
+
+impl BlockTree {
+    pub fn print_tree(&self) {
+        println!("\n===== BLOCK TREE =====");
+        match self.root {
+            Some(root) => self.print_node(root, "", true),
+            None => println!("(empty)"),
+        }
+        println!("======================\n");
+    }
+
+    fn print_node(&self, idx: usize, prefix: &str, is_last: bool) {
+        let node = &self.nodes[idx];
+
+        // formatting helpers
+        let left = node.left.map_or("·".to_string(), |x| x.to_string());
+        let right = node.right.map_or("·".to_string(), |x| x.to_string());
+
+        let base = &self.base_blocks[node.base].base;
+
+        // trim content for readability
+        let content = if node.content.len() > 10 {
+            format!("{}...", &node.content[..10])
+        } else {
+            node.content.clone()
+        };
+
+        println!(
+            "{}{}[{}] base={:?} off={} size={} cnt={} h={} | L:{} R:{} | \"{}\"",
+            prefix,
+            if is_last { "└──" } else { "├──" },
+            idx,
+            base,
+            node.offset,
+            node.size,
+            node.count,
+            node.height,
+            left,
+            right,
+            content
+        );
+
+        let new_prefix = format!(
+            "{}{}",
+            prefix,
+            if is_last { "    " } else { "│   " }
+        );
+
+        match (node.left, node.right) {
+            (Some(l), Some(r)) => {
+                self.print_node(l, &new_prefix, false);
+                self.print_node(r, &new_prefix, true);
+            }
+            (Some(l), None) => {
+                self.print_node(l, &new_prefix, true);
+            }
+            (None, Some(r)) => {
+                self.print_node(r, &new_prefix, true);
+            }
+            (None, None) => {}
+        }
     }
 }
 
@@ -721,3 +806,4 @@ impl BlockTree {
 //         }
 //     }
 // }
+
