@@ -9,7 +9,7 @@ https://members.loria.fr/CIgnat/files/pdf/AndreCollabCom13.pdf
 ## Setting up the project
 
 ```bash
-bun install
+cargo build
 ```
 
 ## Fuzz Testing
