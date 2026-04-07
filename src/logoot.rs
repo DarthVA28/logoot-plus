@@ -8,6 +8,7 @@ pub mod identifiers;
 use crate::identifiers::{Id, Range, get_combined_id};
 use crate::blocktree::{BlockTree, DelLocation};
 
+use std::collections::HashSet;
 use std::{collections::HashMap};
 
 // use rand::RngExt;
@@ -39,16 +40,85 @@ pub struct Operation {
     clock: u32
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OpId { 
+    pub site: u32,
+    pub clock: u32
+}
+
+#[derive(Clone)]
+pub struct OpLog { 
+    ops: Vec<Operation>, 
+    index: HashSet<OpId>, 
+    v_clock: HashMap<u32, u32>,
+    pending: Vec<Operation>
+}
+
+impl OpLog { 
+    pub fn new() -> Self {
+        OpLog { ops: vec![], index: HashSet::new(), v_clock: HashMap::new(), pending: vec![] }
+    }
+
+    pub fn is_recorded(&self, op: &Operation) -> bool {
+        let id = OpId { site: op.site, clock: op.clock };
+        self.index.contains(&id)
+    }
+
+    pub fn is_ready(&self, op: &Operation) -> bool {
+        let clk = self.v_clock.get(&op.site).unwrap_or(&1);
+        op.clock <= clk + 1
+    }
+
+    pub fn record_op(&mut self, op: Operation) {
+        let id = OpId { site: op.site, clock: op.clock };
+        self.index.insert(id);
+        self.v_clock.insert(op.site, op.clock);
+        self.ops.push(op);
+        self.drain_pending();
+    }
+
+    pub fn add_pending(&mut self, op: Operation) {
+        self.pending.push(op);
+    }   
+
+    pub fn drain_pending(&mut self) -> Vec<Operation> {
+        let mut ready_ops = vec![];
+        let mut still_pending = vec![];
+        let mut changed = false;
+        for op in self.pending.drain(..) {
+            let id = OpId { site: op.site, clock: op.clock };
+            if self.index.contains(&id) {
+                continue;
+            }
+            let clk = self.v_clock.get(&op.site).unwrap_or(&1);
+            if op.clock == clk + 1 {
+                self.index.insert(id);
+                self.v_clock.insert(op.site, op.clock);
+                ready_ops.push(op);
+            } else {
+                still_pending.push(op);
+            }
+        }
+
+        self.pending = still_pending;
+        ready_ops
+    }
+
+    pub fn clear(&mut self) {
+        self.ops.clear();
+        self.index.clear();
+        self.v_clock.clear();
+        self.pending.clear();
+    }
+}
+
 #[derive(Clone)]
 pub struct Document { 
     blocks: BlockTree,
     state: State,
     used_ranges_for_id: HashMap<Id, Range>,
     snapshot: String,
-    operations: Vec<Operation>, 
-    // TODO:: Assumes causal messages, fix later
-    last_seen: HashMap<u32, u32>,
-    // rng: StdRng
+    oplog: OpLog,
     rng: ChaCha8Rng,
 }
 
@@ -60,15 +130,17 @@ impl Document {
             state: State { local_clock: 1, replica: id },
             used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
-            operations: Vec::new(),
-            last_seen: HashMap::new(),
+            oplog: OpLog::new(),
+            // operations: Vec::new(),
+            // last_seen: HashMap::new(),
             rng: ChaCha8Rng::seed_from_u64(42)
         }
     }
 
     pub fn ins(&mut self, pos: u32, text: String) {
         let op = local_insert(self, pos, text);
-        self.operations.push(op);
+        // self.operations.push(op);
+        self.oplog.record_op(op);
         self.state.local_clock += 1;
         // println!("Blocktree @ site {} after local insert:", self.state.replica);
         // self.blocks.print_tree();
@@ -76,7 +148,8 @@ impl Document {
 
     pub fn del(&mut self, _from: u32, _to: u32) {
         let op = local_delete(self, _from, _to);
-        self.operations.push(op);
+        // self.operations.push(op);
+        self.oplog.record_op(op);
         self.state.local_clock += 1;
         // println!("Blocktree @ site {} after local delete:", self.state.replica);
         // self.blocks.print_tree();
@@ -91,18 +164,23 @@ impl Document {
     }
 
     pub fn merge_from(&mut self, other: &Document) {
-        for op in &other.operations {
-            if self.last_seen.get(&op.site).unwrap_or(&0) >= &op.clock {
+        for op in &other.oplog.ops {
+            if self.oplog.is_recorded(op) {
                 continue;
             }
-            // print the whole operation for debugging
-            // println!("Merging Operation type: {:?}, ids: {:?}, payload: {:?}, site: {}, clock: {}", op.op_type, op.ids, op.payload, op.site, op.clock);
-            // println!("Merging operation from site {} with clock {}", op.site, op.clock);
-            self.last_seen.insert(op.site, op.clock);
+
+            if !self.oplog.is_ready(&op) {
+                self.oplog.add_pending(op.clone());
+                continue;
+            }
+
+            // We are ready to apply this operation, first record it in the oplog and then apply it
             match op.op_type {
                 OperationType::Insert => remote_insert(self, &op),
                 OperationType::Delete => remote_delete(self, &op)
             }
+
+            self.oplog.record_op(op.clone());
             // println!("After merging, blocktree is:");
             // self.blocks.print_tree();
         }
@@ -112,8 +190,7 @@ impl Document {
         self.blocks.clear();
         self.used_ranges_for_id.clear();
         self.snapshot.clear();
-        self.operations.clear();
-        self.last_seen.clear();
+        self.oplog.clear();
     }
 }
 
@@ -666,6 +743,7 @@ fn run_insert_delete(seed: u64) {
     let mut docs = vec![
         Document::new(0),
         Document::new(1),
+        Document::new(2),
     ];
 
     let alphabet: Vec<char> = "abc".chars().collect();
@@ -718,7 +796,7 @@ fn run_insert_delete(seed: u64) {
 
 #[test]
 fn test_insert_delete_heavy() {
-    for i in 0..100 {
+    for i in 0..1000 {
         run_insert_delete(i);
     }
 }
