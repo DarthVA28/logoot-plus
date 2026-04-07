@@ -1,8 +1,14 @@
 /* 
 An implementation of Block Trees in the form of AVL Trees
 */
-use std::{cmp::Ordering, path};
-use crate::identifiers::{Id, Range}; 
+use std::cmp::Ordering;
+use crate::identifiers::{Id, Range, get_combined_id}; 
+
+fn compare_ids(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32) -> Ordering {
+    let node_id = get_combined_id(node_base, node_offset);
+    let search_id = get_combined_id(search_base, search_offset);
+    search_id.cmp(&node_id)
+}
 
 fn search_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
     match search_base.cmp(node_base) {
@@ -20,20 +26,8 @@ fn search_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_off
     }
 }
 
-fn ins_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
-    match search_base.cmp(node_base) {
-        Ordering::Less => Ordering::Less,
-        Ordering::Greater => Ordering::Greater,
-        Ordering::Equal => {
-            if search_offset < node_offset {
-                Ordering::Less // go left
-            } else if search_offset >= node_offset + node_size {
-                Ordering::Greater 
-            } else {
-                Ordering::Equal 
-            }
-        }
-    }
+fn ins_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32) -> Ordering {
+    compare_ids(search_base, search_offset, node_base, node_offset)
 }
 
 #[derive(Clone)]
@@ -274,7 +268,7 @@ impl BlockTree {
             // Update its children 
             if i+1 < path_len { 
                 let old_child = path_to_root[i+1];
-                if (node.left == Some(old_child)) {
+                if node.left == Some(old_child) {
                     self.nodes[idx].left = Some(curr);
                 } else { 
                     self.nodes[idx].right = Some(curr);
@@ -364,12 +358,12 @@ impl BlockTree {
             let node = &mut self.nodes[curr];
             let node_base = node.base;
             let node_offset = node.offset;
-            let node_size = node.size;
+            let _node_size = node.size;
             let node_left = node.left;
             let node_right = node.right;
             let node_base_id = &self.base_blocks[node_base].base;
 
-            match ins_cmp_key(search_id, offset, node_base_id, node_offset, node_size) {
+            match ins_cmp_key(search_id, offset, node_base_id, node_offset) {
                 Ordering::Less => {
                     if node.left.is_none() {
                         node.left = Some(idx);
@@ -554,7 +548,7 @@ impl<'a> Iterator for InOrderIter<'a> {
 }
 
 impl BlockTree {
-    pub fn inorder_iter(&self) -> InOrderIter {
+    pub fn inorder_iter(&self) -> InOrderIter<'_> {
         InOrderIter::new(self)
     }
 }

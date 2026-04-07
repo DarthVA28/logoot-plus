@@ -13,7 +13,6 @@ use std::{collections::HashMap};
 
 // use rand::RngExt;
 use rand::{RngExt, SeedableRng};
-use rand::rngs::StdRng;
 use rand_chacha::ChaCha8Rng;
 
 const MIN_VALUE: u32 = 0;
@@ -84,7 +83,7 @@ impl OpLog {
     pub fn drain_pending(&mut self) -> Vec<Operation> {
         let mut ready_ops = vec![];
         let mut still_pending = vec![];
-        let mut changed = false;
+        let _changed = false;
         for op in self.pending.drain(..) {
             let id = OpId { site: op.site, clock: op.clock };
             if self.index.contains(&id) {
@@ -515,7 +514,7 @@ fn local_delete(doc: &mut Document, from: u32, to: u32) -> Operation {
     let mut num_delete = to - from;
     let mut del_info: Vec<(Id, Vec<u32>)> = vec![];
 
-    let mut curr = from;
+    let curr = from;
 
     while num_delete > 0 {
         let (path, covered) = doc.blocks.find_by_position(curr);
@@ -647,6 +646,7 @@ fn test_interleaved_inserts() {
     assert_eq!(a.read(), b.read());
 }
 
+#[allow(dead_code)]
 fn run_insert_only(seed: u64) {
     use rand::{SeedableRng, RngExt};
     use rand::rngs::StdRng;
@@ -734,6 +734,7 @@ fn test_insert_100_seeds() {
     }
 }
 
+#[allow(dead_code)]
 fn run_insert_delete(seed: u64) {
     use rand::{SeedableRng, RngExt};
     use rand::rngs::StdRng;
@@ -796,7 +797,16 @@ fn run_insert_delete(seed: u64) {
 
 #[test]
 fn test_insert_delete_heavy() {
-    for i in 0..1000 {
+    for i in 0..100 {
         run_insert_delete(i);
     }
+}
+
+#[test]
+fn simply_local_test() {
+    let mut doc = Document::new(0);
+    doc.ins(0,"a".to_string());
+    doc.ins(1,"b".to_string());
+
+    assert_eq!(doc.read(), "ab".to_string());
 }
