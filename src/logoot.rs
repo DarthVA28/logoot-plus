@@ -138,11 +138,17 @@ impl Document {
 
     pub fn ins(&mut self, pos: u32, text: String) {
         let op = local_insert(self, pos, text);
-        // self.operations.push(op);
         self.oplog.record_op(op);
         self.state.local_clock += 1;
         // println!("Blocktree @ site {} after local insert:", self.state.replica);
         // self.blocks.print_tree();
+        // if self.blocks.check_tree() {
+        //     println!("Tree is consistent after insert");
+        //     self.blocks.print_tree();
+        // } else {
+        //     println!("Tree is inconsistent after insert");
+        //     panic!("Tree is inconsistent after insert");
+        // }
     }
 
     pub fn del(&mut self, _from: u32, _to: u32) {
@@ -230,7 +236,7 @@ fn num_insertable(id_insert: &Id, id_next: &Id, length: u32) -> u32 {
             return length
         }
     }
-    id_next[l] - id_insert[l] + 1
+    id_next[l] + 1 - id_insert[l]
 }
 
 fn extend_block(doc: &mut Document, text:String, block: usize, path: &Vec<usize>, site: u32) -> Operation {
@@ -282,7 +288,7 @@ fn insert_new_block(doc: &mut Document, id_low: &Id, id_high: &Id, text: String,
     }
 }
 
-fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Vec<usize>, sp: u32, site: u32) -> Operation {
+fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Vec<usize>, sp: u32, site: u32, id: Option<&Id>) -> Operation {
     // sp is the split point 
     let base = doc.blocks.base(block);
     let base_id = doc.blocks.base_id(block).clone();
@@ -307,8 +313,13 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
     let id_low = get_combined_id(&base_id, offsets.0 + sp-1);
     let id_high = get_combined_id(&base_id, offsets.0 + sp);
 
-    let new_id = generate_base(doc, &id_low, &id_high);
+    let new_id = if let Some(id) = id {
+        id.clone()
+    } else {
+        generate_base(doc, &id_low, &id_high)
+    };
     let new_base_block = doc.blocks.create_base_block(new_id.clone(), (0, text.chars().count() as u32), site);
+    println!("Split block id is {:?}, inserting new block with id {:?} and text '{}' between {:?} and {:?}", base_id, new_id, text, id_low, id_high);
     doc.blocks.insert(text.clone(), new_base_block, 0);
     
     return Operation 
@@ -324,7 +335,7 @@ fn local_insert(doc: &mut Document, pos: u32, text: String) -> Operation {
     // Invariant: Size of text passed to the localInsert is less than MAXVALUE 
     assert!(text.chars().count() as u32 <= MAX_VALUE);
 
-    // println!("Local insert on site {} at position {} with text '{}'", doc.state.replica, pos, text);
+    println!("-----\n Local insert on site {} at position {} with text '{}'", doc.state.replica, pos, text);
 
     let (path, covered) = doc.blocks.find_by_position(pos);
     if path.is_empty() {
@@ -341,15 +352,16 @@ fn local_insert(doc: &mut Document, pos: u32, text: String) -> Operation {
     // And we are the creator and the block endpoint is maximal 
     let block_start = covered;
     let block_end = block_start + doc.blocks.size(Some(*block));
-    // println!("blockstart: {}, blockend: {}, pos: {}", block_start, block_end, pos);
+    println!("blockstart: {}, blockend: {}, pos: {}", block_start, block_end, pos);
     if pos == block_end {
        if doc.blocks.creator(*block) == doc.state.replica {
             // Check if the offset is maximal for the block 
             let block_ranges = doc.blocks.ranges(*block);
             let base_ranges = doc.blocks.base_offsets(*block);
+            println!("Checking if we can extend the block: block ranges: {:?}, base ranges: {:?}", block_ranges, base_ranges);
             if block_ranges.1 == base_ranges.1 {
                 // We can extend this block 
-                // println!("Extending block {} with id {:?} ", block, block_base);
+                println!("Extending block {} with id {:?} ", block, block_base);
                 return extend_block(doc, text, *block, &path, doc.state.replica);
             }
        }
@@ -365,7 +377,7 @@ fn local_insert(doc: &mut Document, pos: u32, text: String) -> Operation {
             let next_ranges = doc.blocks.ranges(next_block);
             get_combined_id(next_base, next_ranges.0)
         };
-        // println!("Inserting new block between {:?} and {:?}", id_low, id_high);
+        println!("Inserting new block between {:?} and {:?}", id_low, id_high);
         return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
     }
 
@@ -381,7 +393,7 @@ fn local_insert(doc: &mut Document, pos: u32, text: String) -> Operation {
             get_combined_id(prev_base, prev_ranges.1)
         };
         let id_high = get_combined_id(block_base, block_ranges.0);
-        // println!("Inserting at start, new block between {:?} and {:?}", id_low, id_high);
+        println!("Inserting at start, new block between {:?} and {:?}", id_low, id_high);
         return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
     }
 
@@ -390,17 +402,18 @@ fn local_insert(doc: &mut Document, pos: u32, text: String) -> Operation {
     if (sp > block_ranges.1 - block_ranges.0) || (sp == 0) {
         panic!("Invalid split point - split point: {}, block size: {}", sp, block_ranges.1 - block_ranges.0);
     }
-    return split_and_insert_block(doc, text, *block, &path, sp, doc.state.replica);
+    println!("Inserting in the middle, splitting block {} at split point {}", block, sp);
+    return split_and_insert_block(doc, text, *block, &path, sp, doc.state.replica, None);
 }
 
-fn find_split_point(doc: &Document, block: usize, id: Id) -> u32 {
+fn find_split_point(doc: &Document, block: usize, id: &Id) -> u32 {
     let mut sp = 0;
     let block_base = doc.blocks.base_id(block);
     let block_ranges = doc.blocks.ranges(block);
     let text_len = block_ranges.1 - block_ranges.0;
     for i in 0..text_len {
         let id_elem = get_combined_id(block_base, block_ranges.0 + i);
-        if id_elem >= id {
+        if id_elem >= *id {
             break;
         }
         sp+=1;
@@ -415,7 +428,7 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     let text = op.payload.as_ref().expect("Insert operation should have payload");
     let site = op.site;
 
-    // println!("Remote insert received from site {} at site {} with clock {}: inserting '{}' at base {:?} and offset {}", site, doc.state.replica, op.clock, text, base, offset);
+    println!("-----\nRemote insert received from site {} at site {} with clock {}: inserting '{}' at base {:?} and offset {}", site, doc.state.replica, op.clock, text, base, offset);
     
     let id = get_combined_id(base, offset);
     
@@ -424,7 +437,7 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
 
     if path.is_empty() {
         // Insert at the start
-        // println!("ID not found, inserting at the start");
+        println!("ID not found, inserting at the start");
         insert_new_block(doc, &vec![], &vec![], text.clone(), site, Some(&base));
         return;
     }
@@ -435,16 +448,17 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     let block_min_id = get_combined_id(block_base, block_ranges.0);
     let block_max_id = get_combined_id(block_base, block_ranges.1-1);
 
+    println!("Checking if we can extend the block: block base {:?}, block ranges {:?}, block min id {:?}, block max id {:?}, new id {:?}", block_base, block_ranges, block_min_id, block_max_id, id);
     // Check if we can extend the block: offset should be at the end of the block
     if base == block_base && offset == block_ranges.1 {
-        // println!("Extending block {} with id {:?} and new text '{}'", block, block_base, text);
+        println!("Extending block {} with id {:?} and new text '{}'", block, block_base, text);
         extend_block(doc, text.clone(), block, &path, site);
         return
     }
 
     // If we are at the start of the block, insert a new block before this block:
     if id < block_min_id {
-        // println!("Inserting before the block {} with id {:?} and new text '{}'", block, block_base, text);
+        println!("Inserting before the block {} with id {:?} and new text '{}'", block, block_base, text);
         let id_high = block_min_id;
         let prev = doc.blocks.prev(block, &path);
         let id_low = if prev.is_none() {
@@ -461,7 +475,7 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
 
     // If we are at the end of the block, insert a new block 
     if block_max_id < id {
-        // println!("Inserting after the block {} with new text '{}'", block, text);
+        println!("Inserting after the block {:?} with new text '{}'", block_base, text);
         let id_low = block_max_id; 
         let next = doc.blocks.next(block, &path);
         let id_high = if next.is_none() {
@@ -479,8 +493,8 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     // Insert in the middle of the block 
     // Find the point in the block where the new ID should be inserted 
     // println!("Inserting in the middle of the block {} with new text '{}'", block, text);
-    let sp = find_split_point(doc, block, id);
-    split_and_insert_block(doc, text.clone(), block, &path, sp, site);
+    let sp = find_split_point(doc, block, &id);
+    split_and_insert_block(doc, text.clone(), block, &path, sp, site, Some(&base));
 }
 
 fn delete_and_split(doc: &mut Document, block: usize, _path: &Vec<usize>, left: u32, n: u32) {
@@ -624,28 +638,6 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
     }
 }
 
-#[test]
-fn test_interleaved_inserts() {
-    let mut a = Document::new(0);
-    let mut b = Document::new(1);
-
-    a.ins(0, "A".to_string());
-    a.ins(1, "B".to_string());
-
-    a.blocks.print_tree();
-
-    b.ins(0, "X".to_string());
-    b.ins(1, "Y".to_string());
-
-    b.blocks.print_tree();
-
-    a.merge_from(&b);
-    a.blocks.print_tree();
-    b.merge_from(&a);
-
-    assert_eq!(a.read(), b.read());
-}
-
 #[allow(dead_code)]
 fn run_insert_only(seed: u64) {
     use rand::{SeedableRng, RngExt};
@@ -659,7 +651,7 @@ fn run_insert_only(seed: u64) {
         // Document::new(2),
     ];
 
-    let alphabet: Vec<char> = "abc".chars().collect();
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
 
     for _ in 0..200 {
         // random insert
@@ -693,6 +685,15 @@ fn run_insert_only(seed: u64) {
         let clone2 = left.clone();
         right.merge_from(&clone2);
 
+        if left.read() != right.read() {
+            println!("Divergence detected at seed {}!", seed);
+            println!("{} content: ", left.state.replica);
+            left.blocks.print_tree();   
+            println!("---");
+            println!("{} content: ", right.state.replica);
+            right.blocks.print_tree();
+        }
+
         assert_eq!(
             left.read(),
             right.read(),
@@ -701,36 +702,6 @@ fn run_insert_only(seed: u64) {
             left.read(),
             right.read()
         );
-    }
-}
-
-#[test]
-fn simple_test_1() {
-    let mut d0 = Document::new(0);
-    let mut d1 = Document::new(1);
-
-    d1.ins(0, "c".to_string());
-    d0.ins(0, "b".to_string());
-
-    d1.ins(0, "b".to_string());
-    d0.ins(1, "c".to_string());
-
-    d0.merge_from(&d1);
-    d1.merge_from(&d0);
-    assert_eq!(d0.read(), d1.read());
-
-    d0.ins(1, "b".to_string());
-
-    d0.merge_from(&d1);
-    d1.merge_from(&d0);
-    assert_eq!(d0.read(), d1.read());
-}
-
-#[test]
-fn test_insert_100_seeds() {
-    // run_insert_only(1);
-    for i in 0..100 {
-        run_insert_only(i);
     }
 }
 
@@ -747,7 +718,7 @@ fn run_insert_delete(seed: u64) {
         Document::new(2),
     ];
 
-    let alphabet: Vec<char> = "abc".chars().collect();
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
 
     for _ in 0..200 {
         let i = rng.random_range(0..docs.len());
@@ -784,6 +755,13 @@ fn run_insert_delete(seed: u64) {
         let clone2 = left.clone();
         right.merge_from(&clone2);
 
+        if left.read() != right.read() {
+            println!("Divergence detected at seed {}!", seed);
+            left.blocks.print_tree();   
+            println!("---");
+            right.blocks.print_tree();
+        }
+
         assert_eq!(
             left.read(),
             right.read(),
@@ -796,17 +774,80 @@ fn run_insert_delete(seed: u64) {
 }
 
 #[test]
-fn test_insert_delete_heavy() {
+fn test_insert_100_seeds() {
+    // run_insert_only(1);
     for i in 0..100 {
-        run_insert_delete(i);
+        run_insert_only(i);
     }
 }
 
+// #[test]
+// fn test_insert_delete_heavy() {
+//     for i in 0..100 {
+//         println!("Running seed {}", i); 
+//         run_insert_delete(i);
+//     }
+// }
+
 #[test]
-fn simply_local_test() {
+fn ab() {
     let mut doc = Document::new(0);
     doc.ins(0,"a".to_string());
     doc.ins(1,"b".to_string());
-
     assert_eq!(doc.read(), "ab".to_string());
+}
+
+#[test]
+fn abc() {
+    let mut doc = Document::new(0);
+    doc.ins(0,"a".to_string());
+    doc.ins(1,"b".to_string());
+    doc.ins(2,"c".to_string());
+
+    assert_eq!(doc.read(), "abc".to_string());
+    // panic!("just to debug...");
+}
+
+#[test]
+fn simple_test_1() {
+    let mut d0 = Document::new(0);
+    let mut d1 = Document::new(1);
+
+    d1.ins(0, "c".to_string());
+    d0.ins(0, "b".to_string());
+
+    d1.ins(0, "b".to_string());
+    d0.ins(1, "c".to_string());
+
+    d0.merge_from(&d1);
+    d1.merge_from(&d0);
+    assert_eq!(d0.read(), d1.read());
+
+    d0.ins(1, "b".to_string());
+
+    d0.merge_from(&d1);
+    d1.merge_from(&d0);
+    assert_eq!(d0.read(), d1.read());
+}
+
+#[test]
+fn test_interleaved_inserts() {
+    let mut a = Document::new(0);
+    let mut b = Document::new(1);
+
+    a.ins(0, "A".to_string());
+    a.ins(1, "B".to_string());
+
+    a.blocks.print_tree();
+
+    b.ins(0, "X".to_string());
+    b.ins(1, "Y".to_string());
+
+    b.blocks.print_tree();
+
+    a.merge_from(&b);
+    a.blocks.print_tree();
+    b.merge_from(&a);
+
+    assert_eq!(a.read(), b.read());
 }

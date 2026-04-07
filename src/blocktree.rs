@@ -10,19 +10,27 @@ fn compare_ids(search_base: &Id, search_offset: u32, node_base: &Id, node_offset
     search_id.cmp(&node_id)
 }
 
-fn search_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32,  node_size: u32) -> Ordering {
-    match search_base.cmp(node_base) {
-        Ordering::Less => Ordering::Less,
-        Ordering::Greater => Ordering::Greater,
-        Ordering::Equal => {
-            if search_offset < node_offset {
-                Ordering::Less // go left
-            } else if search_offset > node_offset + node_size {
-                Ordering::Greater 
-            } else {
-                Ordering::Equal 
-            }
-        }
+/* FIXME */
+/*
+ Detailed bug description:: 
+ - Find by ID is being used for 2 purposes simultaneously:
+ - If a block with the same ID exists, we want to return it 
+ - Else we want to return a block in which that ID is contained (needed for splitting etc)
+ - These conflict in the search_id > node_id_end condition: if we put this requirement then we end up picking up _smaller_ blocks which are prefixes of our ID
+ - If we relax this condition and make it search_id >= node_id then we miss out on the first case -- same ID does exist and we can extend it but we don't do it properly
+ - TO BE FIXED!
+*/
+fn search_cmp_key(search_base: &Id, search_offset: u32, node_base: &Id, node_offset: u32, node_size: u32) -> Ordering {
+    let node_id_start = get_combined_id(node_base, node_offset);
+    let node_id_end = get_combined_id(node_base, node_offset + node_size);
+    let search_id = get_combined_id(search_base, search_offset);
+
+    if search_id < node_id_start {
+        Ordering::Less
+    } else if search_id > node_id_end {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
     }
 }
 
@@ -159,6 +167,9 @@ impl BlockTree {
         node.content.push_str(text);
         let added_size = text.chars().count() as u32;
         node.size += added_size;
+        // update the offsets of the base 
+        let base_block = &mut self.base_blocks[node.base];
+        base_block.range.1 += added_size;
         for idx in path_to_root.iter().rev() {
             self.update_node(*idx);
         }
@@ -297,7 +308,7 @@ impl BlockTree {
             };
             if curr < left_count {
                 i = left;
-            } else if curr < left_count + node.size {
+            } else if curr <= left_count + node.size {
                 covered += left_count;
                 return (path_to_root, covered);
             } else { 
@@ -321,6 +332,9 @@ impl BlockTree {
             // Check if bases match and offset is contained 
             let base_block = &self.base_blocks[node.base];
             let node_base = &base_block.base;
+            if *base == [11, 0, 1] {
+                self.print_tree();  
+            }
             match search_cmp_key(base, offset, node_base, node.offset, node.size) { 
                 Ordering::Less => i = node.left,
                 Ordering::Greater => i = node.right,
@@ -328,8 +342,6 @@ impl BlockTree {
             }
         }
         path_to_root
-        // // CHECK THIS 
-        // return vec![];
     }
 
     /* Public function to create a new base block */
@@ -505,6 +517,36 @@ impl BlockTree {
         None
     }
 
+    // Check the tree in terms of Ids
+    pub fn check_tree(&self) -> bool {
+        fn check_node(tree: &BlockTree, node_idx: Option<usize>, min_id: Option<(Id, u32)>, max_id: Option<(Id, u32)>) -> bool {
+            if let Some(idx) = node_idx {
+                let node = &tree.nodes[idx];
+                let base_block = &tree.base_blocks[node.base];
+                let _node_id = get_combined_id(&base_block.base, node.offset);
+
+                // Check BST property
+                if let Some((min_base, min_offset)) = &min_id {
+                    if compare_ids(min_base, *min_offset, &base_block.base, node.offset) != Ordering::Less {
+                        return false;
+                    }
+                }
+                if let Some((max_base, max_offset)) = &max_id {
+                    if compare_ids(max_base, *max_offset, &base_block.base, node.offset) != Ordering::Greater {
+                        return false;
+                    }
+                }
+
+                // Check left and right subtrees
+                check_node(tree, node.left, min_id.clone(), Some((base_block.base.clone(), node.offset))) &&
+                check_node(tree, node.right, Some((base_block.base.clone(), node.offset)), max_id.clone())
+            } else {
+                true
+            }
+        }
+
+        check_node(self, self.root, None, None) 
+    }
 
 }
 
@@ -580,7 +622,7 @@ impl BlockTree {
         };
 
         println!(
-            "{}{}[{}] base={:?} off={} size={} cnt={} h={} | L:{} R:{} | \"{}\"",
+            "{}{}[{}] base={:?} off={} size={} cnt={} h={} | L:{} R:{} | \"{}\" | creator={}",
             prefix,
             if is_last { "└──" } else { "├──" },
             idx,
@@ -591,7 +633,8 @@ impl BlockTree {
             node.height,
             left,
             right,
-            content
+            content,
+            self.base_blocks[node.base].creator
         );
 
         let new_prefix = format!(
