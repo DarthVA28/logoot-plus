@@ -8,4 +8,4 @@ path = "src/logoot.rs"
 
 [dependencies]
 rand = "0.10.0"
-
+rand_chacha = "0.10"
