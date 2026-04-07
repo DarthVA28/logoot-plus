@@ -12,18 +12,19 @@ https://members.loria.fr/CIgnat/files/pdf/AndreCollabCom13.pdf
 bun install
 ```
 
-## Running the Editor
+## Fuzz Testing
+
+For testing using fuzzer:
+
+```bash
+cargo test
+```
+
+<!-- ## Running the Editor
 
 ```bash
 bun build editor.ts --outfile=bundle.js --target=browser
 ```
 
 Then open `index.html` in the browser of your choice
-
-## Fuzz Testing
-
-For testing using fuzzer:
-
-```bash
-bun run fuzzer.ts
-```
+ -->
