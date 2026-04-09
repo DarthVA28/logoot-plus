@@ -1,5 +1,4 @@
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use rand::RngExt;
 use crate::state::State;
 
 pub type Range = (u32, u32);
@@ -25,6 +24,10 @@ impl Identifier {
     pub fn is_base_same(&self, other: &Identifier) -> bool {
         // FIXME: 
         self.id == other.id
+    }
+    
+    pub fn to_string(&self) -> String {
+        self.id.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(".")
     }
 }
 
@@ -81,7 +84,11 @@ impl IdentifierInterval {
     }
 
     pub fn id_end(&self) -> Id {
-        self.base.with_offset(self.hi)
+        self.base.with_offset(self.hi-1)
+    }
+
+    pub fn contains(&self, id: &Id) -> bool {
+        self.id_begin() < *id && *id < self.id_end()
     }
 }
 
@@ -115,18 +122,19 @@ pub fn compare_intervals(b1: &IdentifierInterval, b2: &IdentifierInterval) -> Id
     }
 
     // Different bases -- check if bases fall in each other's range
-    let b1_start = b1.id_begin();
+    let b1_start: Identifier = b1.id_begin();
     let b1_end = b1.id_end();
     let b2_start = b2.id_begin();
-    let b2_end = b2.id_end();
+    let b2_end: Identifier = b2.id_end();
 
-    if b1.base >= b2_start && b1.base <= b2_end {
-        return IdOrderingRelation::B1InsideB2
-    } else if b2.base >= b1_start && b2.base <= b1_end {
+    // Containment checks 
+    if b1.contains(&b2.id_begin()) {
         return IdOrderingRelation::B2InsideB1
-    } 
-    
-    if b1.base < b2.base {
+    } else if b2.contains(&b1.id_begin()) {
+        return IdOrderingRelation::B1InsideB2
+    }
+
+    if b1_start < b2_start {
         return IdOrderingRelation::B1BeforeB2
     } else {
         return IdOrderingRelation::B1AfterB2
