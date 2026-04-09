@@ -1,10 +1,21 @@
+use core::panic;
+use std::collections::HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, num_insertable};
+use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, generate_base, num_insertable};
+use crate::state::State;
+use crate::operation::{Operation, OperationType, OpId, OpLog};
 
+#[derive(Clone)]
 pub struct Tree {
     pub nodes: Vec<Node>, 
     pub root: Option<usize>,
-    free_list: Vec<usize>
+    free_list: Vec<usize>,
+    base_to_offsets: HashMap<String, (u32, u32)>
+}
+
+pub enum DelLocation {
+    Start, 
+    End
 }
 
 /* Basic helper functions */
@@ -13,8 +24,16 @@ impl Tree {
         Tree {
             root: None, 
             nodes: Vec::new(),
-            free_list: Vec::new()
+            free_list: Vec::new(),
+            base_to_offsets: HashMap::new()
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.root = None;
+        self.nodes.clear();
+        self.free_list.clear();
+        self.base_to_offsets.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -88,6 +107,46 @@ impl Tree {
         let base = self.nodes[node].base_id.clone();
         let offset = self.nodes[node].offset;
         IdentifierInterval::new(base, offset, offset + self.nodes[node].size as u32)
+    }
+
+    pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
+        let node = &mut self.nodes[node];
+        node.content.push_str(text);
+        let added_size = text.chars().count();
+        node.size += added_size;
+        // update the offsets of the base 
+        let base_str = node.base_id.to_string();
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_str) {
+            let new_hi = hi + added_size as u32;
+            self.base_to_offsets.insert(base_str, (*lo, new_hi));
+        } 
+        for idx in path_to_root.iter().rev() {
+            self.update_node(*idx);
+        }
+    }
+
+    pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
+        let node = &mut self.nodes[node];
+        let content_len = node.content.chars().count();
+        match location {
+            DelLocation::Start => {
+                let new_content: String = node.content.chars().skip(num_delete as usize).collect();
+                node.content = new_content;
+            }
+            DelLocation::End => {
+                let new_content: String = node.content.chars().take(content_len - num_delete).collect();
+                node.content = new_content;
+            }
+        }
+        node.size -= num_delete as usize;
+        // update offsets 
+        node.offset = match location {
+            DelLocation::Start => node.offset + num_delete as u32,
+            DelLocation::End => node.offset
+        };
+        for idx in path_to_root.iter().rev() {
+            self.update_node(*idx);
+        }
     }
 }
 
@@ -186,7 +245,7 @@ impl Tree {
 /* Inorder Predecessor and Successor Functions */
 impl Tree {
     // Function to get inorder successor of a node
-    fn next(&self, node: usize, path: &[usize]) -> Option<usize> {
+    pub fn next(&self, node: usize, path: &[usize]) -> Option<usize> {
         let nodes = &self.nodes;
         let curr = node;
 
@@ -233,6 +292,35 @@ impl Tree {
 }
 
 impl Tree {
+    pub fn find_by_pos(&self, pos: usize) -> (Vec<usize>, usize) {
+        let mut path_to_root: Vec<usize> = vec![]; 
+        let nodes = &self.nodes;
+        let mut i = self.root;
+        let mut curr = pos;
+        let mut covered: usize = 0;
+        while let Some(index) = i { 
+            let node = &nodes[index];
+            path_to_root.push(index);
+            let left = node.left;
+            let left_count = if let Some(left_index) = left {
+                nodes[left_index].subtree_count
+            } else {
+                0
+            };
+            if curr < left_count {
+                i = left;
+            } else if curr <= left_count + node.size {
+                covered += left_count;
+                return (path_to_root, covered);
+            } else { 
+                curr -= left_count + node.size;
+                covered += left_count + node.size;
+                i = node.right;
+            }
+        }
+        (path_to_root, covered)
+    }
+
     /// Insert the node by identifier  
     pub fn insert_by_id(&mut self, site: u32, base: Id, offset: u32, content: String) {
         let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
@@ -242,6 +330,12 @@ impl Tree {
         }
         let from = self.root.unwrap();
         let len = content.chars().count() as u32;
+        // Lookup in base to offsets map and modify the offsets accordingly
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base.to_string()) {
+            // Modify the offsets accordingly
+            let new_hi = std::cmp::max(*hi, offset + len);
+            self.base_to_offsets.insert(base.to_string(), (*lo, new_hi));
+        }
         let insert_interval = IdentifierInterval::new(base, offset, offset + len);
         return self.insert_rec(idx, insert_interval, from, content);
     }
@@ -364,6 +458,120 @@ impl Tree {
         }
         self.rebalance(path);
     }
+
+    pub fn splice(&mut self, path: &[usize], target: usize, replacement: Option<usize>) {
+        if path.len() == 1 {
+            // Target is root 
+            self.root = replacement;
+            self.free(target);
+            return;
+        }
+
+        let parent_idx = path[path.len() - 2];
+        let parent = &mut self.nodes[parent_idx];
+        if parent.left == Some(target) {
+            parent.left = replacement;
+        } else if parent.right == Some(target) {
+            parent.right = replacement;
+        } else { 
+            panic!("splice: invalid path, target not a child of its parent");
+        }
+
+        self.free(target);
+        self.rebalance(path[..path.len()-1].to_vec());
+    }
+
+    pub fn delete_by_id(&mut self, base: Id, offset: u32) -> Result<(), ()> {
+        // let mut path: Vec<usize> = vec![];
+        if self.is_empty() {
+            return Err(())
+        }
+        let path= self.find_by_id(base, offset);
+        if path.is_empty() {
+            return Err(());
+        } 
+
+        let curr = *path.last().unwrap();
+
+        // Found the block to delete, delete the entire thing 
+        let target = &self.nodes[curr];
+        let left = target.left;
+        let right: Option<usize> = target.right;
+
+        match (left, right) {
+            (None, None) => {
+                // No children, just delete
+                self.splice(&path, curr, None);
+            },
+
+            (Some(child), None) | (None, Some(child)) => {
+                self.splice(&path, curr, Some(child));
+            },
+
+            (Some(_), Some(r)) => {
+                let mut succ_path = path.clone();
+                succ_path.push(r);
+                let mut curr = r;
+
+                while let Some(l) = self.nodes[curr].left {
+                    succ_path.push(l);
+                    curr = l;
+                }
+
+                let succ = curr;
+                let succ_payload = self.nodes[succ].clone();
+                let tn = &mut self.nodes[curr];
+                tn.content = succ_payload.content;
+                tn.base_id = succ_payload.base_id;
+                tn.offset  = succ_payload.offset;
+                tn.size    = succ_payload.size;
+
+                let succ_right = self.nodes[succ].right;
+                self.splice(&succ_path, succ, succ_right);
+            }
+        }
+         Ok(())
+    }
+
+    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Vec<usize> {
+        let mut path = vec![];
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let node_idi = IdentifierInterval::new(base, offset, offset+1);
+        let mut curr = self.root.unwrap();
+ 
+        loop {
+            path.push(curr);
+            let b1 = &node_idi;
+            let b2 = &self.node_get_identifier_interval(curr);
+
+            match compare_intervals(b1, &b2) {
+                IdOrderingRelation::B1AfterB2 => {
+                    let from_node = &mut self.nodes[curr];
+                    if let Some(r) = from_node.right {
+                        curr = r;
+                    } else {
+                        break;
+                    } 
+                },
+                IdOrderingRelation::B1BeforeB2 => {
+                    let from_node = &mut self.nodes[curr];
+                    if let Some(l) = from_node.left {
+                        curr = l;
+                    } else {
+                        break;    
+                    }
+                },
+                IdOrderingRelation::B1InsideB2 => {
+                    // Found the block, return the path to it 
+                    return path;
+                }
+                _ => panic!("Unexpected relation between B1 and B2 during find_by_id")
+            }
+        }
+        return vec![];
+    }
 }
 
 
@@ -479,11 +687,14 @@ impl Tree {
 
 }
 
-/// Test cases for insert by ID 
+/* 
+Test cases for AVL TREE
+*/
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identifier::{Id, Range};
+    use crate::identifier::{Id};
 
     fn make_id(x: u32) -> Id {
         Identifier::new(vec![x])
@@ -579,6 +790,86 @@ mod tests {
 
         println!("{}", tree.read());
 
+        check_avl(&tree, tree.root);
+    }
+
+    #[test]
+    fn test_split_in_middle() {
+        let mut tree = Tree::new();
+        tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
+        tree.insert_by_id(1, Identifier { id: vec![5, 2, 7] }, 0, "X".to_string());
+        assert_eq!(tree.read(), "ABCXDE");
+        check_avl(&tree, tree.root);
+    }
+
+    #[test]
+    fn test_split_near_beginning() {
+        let mut tree = Tree::new();
+        tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
+        tree.insert_by_id(1, Identifier { id: vec![5, 0, 9, 9] }, 0, "X".to_string());
+        assert_eq!(tree.read(), "AXBCDE");
+        check_avl(&tree, tree.root);
+    }
+
+        #[test]
+    fn test_split_near_end() {
+        let mut tree = Tree::new();
+        tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
+        tree.insert_by_id(1, Identifier { id: vec![5, 3, 9, 9] }, 0, "X".to_string());
+        assert_eq!(tree.read(), "ABCDXE");
+        check_avl(&tree, tree.root);
+    }
+
+    #[test]
+    fn test_two_successive_splits() {
+        let mut tree = Tree::new();
+        tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
+        tree.insert_by_id(1, Identifier { id: vec![5, 2, 7] }, 0, "X".to_string());
+        tree.insert_by_id(2, Identifier { id: vec![5, 1, 8] }, 0, "Y".to_string());
+        assert_eq!(tree.read(), "ABYCXDE");
+        check_avl(&tree, tree.root);
+    }
+
+    #[test]
+    fn test_three_concurrent_sites() {
+        let mut tree = Tree::new();
+        tree.insert_by_id(2, Identifier { id: vec![70] }, 0, "Rust".to_string());
+        tree.insert_by_id(0, Identifier { id: vec![10] }, 0, "Hello".to_string());
+        tree.insert_by_id(1, Identifier { id: vec![40] }, 0, "from".to_string());
+        assert_eq!(tree.read(), "HellofromRust");
+        check_avl(&tree, tree.root);
+    }
+
+    #[test]
+    fn test_avl_ascending_insertion() {
+        let mut tree = Tree::new();
+        for i in 0..10u32 {
+            tree.insert_by_id(
+                0,
+                Identifier { id: vec![i * 10 + 10] },
+                0,
+                char::from_u32('A' as u32 + i).unwrap().to_string(),
+            );
+        }
+        assert_eq!(tree.read(), "ABCDEFGHIJ");
+        check_avl(&tree, tree.root);
+        // AVL height should be at most 5 for 10 nodes
+        let height = tree.nodes[tree.root.unwrap()].height;
+        assert!(height <= 5, "Expected height ≤ 5, got {}", height);
+    }
+
+    #[test]
+    fn test_mixed_splits_and_prepend() {
+        let mut tree = Tree::new();
+        tree.insert_by_id(0, Identifier { id: vec![50] }, 0, "WXYZ".to_string());
+        tree.insert_by_id(1, Identifier { id: vec![50, 1, 9] }, 0, "M".to_string());
+        tree.insert_by_id(2, Identifier { id: vec![50, 0, 5] }, 0, "N".to_string());
+        tree.insert_by_id(0, Identifier { id: vec![10] }, 0, "START".to_string());
+        assert_eq!(tree.read(), "STARTWN XM YZ".replace(' ', ""));
+        // Written out explicitly so the intent is obvious:
+        assert_eq!(tree.read(), "STARTWNXMyz".replace("yz","YZ"));
+        // Unambiguous form:
+        assert_eq!(tree.read(), "STARTWN XMYZ".replace(" ",""));
         check_avl(&tree, tree.root);
     }
 

@@ -2,10 +2,10 @@ use rand::RngExt;
 use crate::state::State;
 
 pub type Range = (u32, u32);
-const MIN_VALUE: u32 = 0;
-const MAX_VALUE: u32 = 100;
+pub const MIN_VALUE: u32 = 0;
+pub const MAX_VALUE: u32 = 100;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identifier {
     pub id: Vec<u32>
 }
