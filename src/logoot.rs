@@ -21,7 +21,6 @@ pub struct Document {
     used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
     oplog: OpLog,
-    rng: ChaCha8Rng,
 }
 
 impl Document {
@@ -32,12 +31,20 @@ impl Document {
             used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
             oplog: OpLog::new(),
-            rng: ChaCha8Rng::seed_from_u64(42)
         }
     }
 
     pub fn ins(&mut self, pos: usize, text: String) {
+        println!("Before insert::");
+        self.blocks.print_tree();
         let op = local_insert(self, pos, text);
+        if !self.blocks.check_tree() {
+            println!("Corrupted tree structure::");
+            self.blocks.print_tree();
+            panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
+        }
+        println!("After insert::");
+        self.blocks.print_tree();
         self.oplog.record_op(op);
         self.state.local_clock += 1;
     }
@@ -67,10 +74,20 @@ impl Document {
                 continue;
             }
 
+            println!("Applying operation: {:?} from site {}", op, op.site);
+            println!("Before applying this operation, state of document:");
+            self.blocks.print_tree();
+
             // We are ready to apply this operation, first record it in the oplog and then apply it
             match op.op_type {
                 OperationType::Insert => remote_insert(self, &op),
                 OperationType::Delete => remote_delete(self, &op)
+            }
+
+            println!("State of document after applying this operation:");
+            self.blocks.print_tree();
+            if !self.blocks.check_tree() {
+                panic!("Tree structure is invalid after applying operation {:?} from site {}", op, op.site);
             }
 
             self.oplog.record_op(op.clone());
@@ -144,14 +161,37 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
     let rcontent = content.chars().skip(sp as usize).collect::<String>();
     
     // FIXME
+    println!("Splitting block with id {:?} at split point {}, left content '{}', right content '{}'", base_id, sp, lcontent, rcontent);
     let res = doc.blocks.delete_by_id(base_id.clone(), offsets.0);
+    println!("After deleting the block to split:");
+    doc.blocks.print_tree();
+    if !doc.blocks.check_tree() {
+        println!("Corrupted tree structure::");
+        doc.blocks.print_tree();
+        panic!("Tree structure is invalid after deletion in split & insert");
+    }
 
     if res.is_err() {
         panic!("Error deleting block during split");
     }
 
     doc.blocks.insert_by_id(site, base_id.clone(), offsets.0, lcontent.clone());
+    println!("After inserting left split block:");
+    doc.blocks.print_tree();
+    if !doc.blocks.check_tree() {
+        println!("Corrupted tree structure after insert1");
+        doc.blocks.print_tree();
+        panic!("Tree structure is invalid111");
+    }
+    
     doc.blocks.insert_by_id(site, base_id.clone(), offsets.0 + sp, rcontent.clone());
+    println!("After inserting right split block:");
+    doc.blocks.print_tree();
+    if !doc.blocks.check_tree() {
+        println!("Corrupted tree structure after insert2");
+        doc.blocks.print_tree();
+        panic!("Tree structure is invalid222");
+    }
 
     // Insert the new block in between
     let id_low = base_id.with_offset(offsets.0 + sp - 1);
@@ -162,9 +202,15 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
     } else {
         generate_base(&id_low, &id_high, &mut doc.state)
     };
-    println!("Split block id is {:?}, inserting new block with id {:?} and text '{}' between {:?} and {:?}", base_id, new_id, text, id_low, id_high);
+    // println!("Split block id is {:?}, inserting new block with id {:?} and text '{}' between {:?} and {:?}", base_id, new_id, text, id_low, id_high);
     doc.blocks.insert_by_id(site, new_id.clone(), 0, text.clone());
-    
+    println!("After inserting new block in split:");
+    doc.blocks.print_tree();
+    if !doc.blocks.check_tree() {
+        println!("Corrupted tree structure after insert3");
+        doc.blocks.print_tree();
+        panic!("Tree structure is invalid333");
+    }
     return Operation 
     { op_type: OperationType::Insert, 
         ids: vec![(new_id, vec![0])], 
@@ -178,7 +224,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // Invariant: Size of text passed to the localInsert is less than MAXVALUE 
     assert!(text.chars().count() as u32 <= MAX_VALUE);
 
-    println!("-----\n Local insert on site {} at position {} with text '{}'", doc.state.replica, pos, text);
+    // println!("-----\n Local insert on site {} at position {} with text '{}'", doc.state.replica, pos, text);
 
     let (path, covered) = doc.blocks.find_by_pos(pos);
     if path.is_empty() {
@@ -193,16 +239,16 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // And we are the creator and the block endpoint is maximal 
     let block_start = covered;
     let block_end = block_start + doc.blocks.node_size(Some(*block));
-    // println!("blockstart: {}, blockend: {}, pos: {}", block_start, block_end, pos);
+    // println!("found id: {:?} blockstart: {}, blockend: {}, pos: {}", block_base, block_start, block_end, pos);
     if pos == block_end {
        if doc.blocks.node_creator(*block) == doc.state.replica {
             // Check if the offset is maximal for the block 
             let block_ranges = doc.blocks.node_ranges(*block);
             let base_ranges = doc.blocks.node_base_offsets(*block);
-            println!("Checking if we can extend the block: block ranges: {:?}, base ranges: {:?}", block_ranges, base_ranges);
+            // println!("Checking if we can extend the block: block ranges: {:?}, base ranges: {:?}", block_ranges, base_ranges);
             if block_ranges.1 == base_ranges.1 {
                 // We can extend this block 
-                println!("Extending block {} with id {:?} ", block, block_base);
+                // println!("Extending block {} with id {:?} ", block, block_base);
                 return extend_block(doc, text, *block, &path, doc.state.replica);
             }
        }
@@ -242,7 +288,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     if (sp > block_ranges.1 - block_ranges.0) || (sp == 0) {
         panic!("Invalid split point - split point: {}, block size: {}", sp, block_ranges.1 - block_ranges.0);
     }
-    println!("Inserting in the middle, splitting block {} at split point {}", block, sp);
+    // println!("Inserting in the middle, splitting block {} at split point {}", block, sp);
     return split_and_insert_block(doc, text, *block, &path, sp, doc.state.replica, None);
 }
 
@@ -389,5 +435,162 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             let sp = (offset - block_ranges.0) as usize;
             delete_and_split(doc, block, &path, sp, n_delete);
         }
+    }
+}
+
+#[test]
+fn ab() {
+    let mut doc = Document::new(0);
+    doc.ins(0,"a".to_string());
+    doc.ins(1,"b".to_string());
+    assert_eq!(doc.read(), "ab".to_string());
+}
+
+#[test]
+fn abc() {
+    let mut doc = Document::new(0);
+    doc.ins(0,"a".to_string());
+    doc.ins(1,"b".to_string());
+    doc.ins(2,"c".to_string());
+
+    assert_eq!(doc.read(), "abc".to_string());
+    // panic!("just to debug...");
+}
+
+#[test]
+fn simple_test_1() {
+    let mut d0 = Document::new(0);
+    let mut d1 = Document::new(1);
+
+    d1.ins(0, "c".to_string());
+    d0.ins(0, "b".to_string());
+
+    d1.ins(0, "b".to_string());
+    d0.ins(1, "c".to_string());
+
+    d0.merge_from(&d1);
+    d1.merge_from(&d0);
+    assert_eq!(d0.read(), d1.read());
+
+    d0.ins(1, "b".to_string());
+
+    d0.merge_from(&d1);
+    d1.merge_from(&d0);
+    assert_eq!(d0.read(), d1.read());
+}
+
+#[test]
+fn test_interleaved_inserts() {
+    let mut a = Document::new(0);
+    let mut b = Document::new(1);
+
+    a.ins(0, "A".to_string());
+    a.ins(1, "B".to_string());
+
+    a.blocks.print_tree();
+
+    b.ins(0, "X".to_string());
+    b.ins(1, "Y".to_string());
+
+    b.blocks.print_tree();
+
+    a.merge_from(&b);
+    a.blocks.print_tree();
+    b.merge_from(&a);
+
+    assert_eq!(a.read(), b.read());
+}
+
+#[allow(dead_code)]
+fn run_insert_only(seed: u64) {
+    use rand::{SeedableRng, RngExt};
+    use rand::rngs::StdRng;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let mut docs = vec![
+        Document::new(0),
+        Document::new(1),
+        // Document::new(2),
+    ];
+
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+
+    for i in 0..200 {
+        println!("iteration {}", i);
+        // random insert
+        let i = rng.random_range(0..docs.len());
+        let doc = &mut docs[i];
+
+        let len = doc.read().chars().count();
+        let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
+
+        // Generate random string of length 1 to 5
+        // let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
+        let str_len = rng.random_range(1..=3);
+        let ch = (0..str_len).map(|_| alphabet[rng.random_range(0..alphabet.len())]).collect::<String>();
+
+        // let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
+
+        // println!("Before inserting in doc {}", doc.state.replica);
+        // doc.blocks.print_tree();
+        println!("Inserting '{}' at position {} in doc {}", ch, pos, doc.state.replica);
+        doc.ins(pos, ch);
+        // println!("After inserting in doc {}", doc.state.replica);
+        // doc.blocks.print_tree();
+
+        // random merge
+        let a = rng.random_range(0..docs.len());
+        let b = rng.random_range(0..docs.len());
+
+        // let a = 0;
+        // let b = 1;
+
+        if a == b { continue; }
+
+        let (left, right) = if a < b {
+            let (l, r) = docs.split_at_mut(b);
+            (&mut l[a], &mut r[0])
+        } else {
+            let (l, r) = docs.split_at_mut(a);
+            (&mut r[0], &mut l[b])
+        };
+
+        let clone = right.clone();
+        left.merge_from(&clone);
+        println!("After merging, state of {}: ", left.state.replica);
+        left.blocks.print_tree();
+
+        let clone2 = left.clone();
+        right.merge_from(&clone2);
+        println!("After merging, state of {}: ", right.state.replica);
+        right.blocks.print_tree();
+
+        if left.read() != right.read() {
+            println!("Divergence detected at seed {}!", seed);
+            println!("{} content: ", left.state.replica);
+            left.blocks.print_tree();   
+            println!("---");
+            println!("{} content: ", right.state.replica);
+            right.blocks.print_tree();
+        }
+
+        assert_eq!(
+            left.read(),
+            right.read(),
+            "Seed {} diverged\n{} vs {}",
+            seed,
+            left.read(),
+            right.read()
+        );
+    }
+}
+
+#[test]
+fn test_insert_100_seeds() {
+    // run_insert_only(1);
+    for i in 0..100 {
+        println!("Running seed {}", i);
+        run_insert_only(i);
     }
 }

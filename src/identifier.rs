@@ -68,6 +68,7 @@ pub fn generate_base(id_low: &Id, id_high: &Id, state: &mut State) -> Id {
 }
 
 // We will also refer to this as a "block"
+#[derive(Clone, Debug)]
 pub struct IdentifierInterval {
     pub base: Identifier,
     pub lo: u32,
@@ -142,6 +143,7 @@ pub fn compare_intervals(b1: &IdentifierInterval, b2: &IdentifierInterval) -> Id
 }
 
 pub fn num_insertable(id_insert: &Id, id_next: &Id, length: u32) -> u32 { 
+    // println!("Calculating num_insertable between {:?} and {:?} with length {}", id_insert, id_next, length);
     let l = id_insert.id.len()-1;
     if l >= id_next.id.len() {
         return length
@@ -151,5 +153,6 @@ pub fn num_insertable(id_insert: &Id, id_next: &Id, length: u32) -> u32 {
             return length
         }
     }
+    // println!("id_insert.id[l] is {}, id_next.id[l] is {}, so num_insertable is {}", id_insert.id[l], id_next.id[l], id_next.id[l] + 1 - id_insert.id[l]);
     id_next.id[l] + 1 - id_insert.id[l]
 }
