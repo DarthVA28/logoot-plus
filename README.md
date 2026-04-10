@@ -20,11 +20,24 @@ For testing using fuzzer:
 cargo test
 ```
 
-<!-- ## Running the Editor
+## Running the Editor
+
+Prerequisites: 
+- Bun 
+- Wasm-pack
+
+First we need to compile the Rust into a WebAssembly package: 
 
 ```bash
-bun build editor.ts --outfile=bundle.js --target=browser
+wasm-pack build --target web
 ```
 
-Then open `index.html` in the browser of your choice
- -->
+Build the frontend:
+```
+bun build ./editor.ts --outfile ./bundle.js
+```
+
+Run the local server:
+```
+bun x serve .
+```
