@@ -16,11 +16,11 @@ impl WasmDocument {
         }
     }
 
-    pub fn ins(&mut self, pos: u32, text: String) {
+    pub fn ins(&mut self, pos: usize, text: String) {
         self.inner.ins(pos, text);
     }
 
-    pub fn del(&mut self, from: u32, to: u32) {
+    pub fn del(&mut self, from: usize, to: usize) {
         self.inner.del(from, to);
     }
 
