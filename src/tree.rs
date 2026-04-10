@@ -328,6 +328,39 @@ impl Tree {
         (path_to_root, covered)
     }
 
+    pub fn find_by_pos_delete(&self, pos: usize) -> (Vec<usize>, usize) {
+        let mut path_to_root: Vec<usize> = vec![];
+        let nodes = &self.nodes;
+        let mut i = self.root;
+        let mut curr = pos;
+        let mut covered: usize = 0;
+        while let Some(index) = i {
+            let node = &nodes[index];
+            path_to_root.push(index);
+            let left = node.left;
+            let left_count = if let Some(left_index) = left {
+                nodes[left_index].subtree_count
+            } else {
+                0
+            };
+            if curr < left_count {
+                i = left;
+            } else if curr < left_count + node.size {
+                // Deletion pos lands on a character *within* this node.
+                // Unlike insertion, we use strict `<` because there is no
+                // valid deletion position at the right edge of the node
+                // (that would be the first character of the right subtree).
+                covered += left_count;
+                return (path_to_root, covered);
+            } else {
+                curr -= left_count + node.size;
+                covered += left_count + node.size;
+                i = node.right;
+            }
+        }
+        (path_to_root, covered)
+    }
+
     /// Insert the node by identifier  
     pub fn insert_by_id(&mut self, site: u32, base: Id, offset: u32, content: String) {
         let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
@@ -351,7 +384,6 @@ impl Tree {
     }
 
     fn find_split_point(node_idi: &IdentifierInterval, id_insert: &Id) -> u32 {
-        // println!("Finding split point for insert id {:?} in Id {:?} (offsets: {}-{})", id_insert, node_idi.base, node_idi.lo, node_idi.hi);
         let mut sp = 0;
         let text_len = node_idi.hi - node_idi.lo;
         for i in 0..text_len {
@@ -361,7 +393,6 @@ impl Tree {
             }
             sp+=1;
         }
-        // println!("Split point found at offset {} ({} chars into the node)", sp, sp);
         return sp;
     }
 
@@ -379,7 +410,6 @@ impl Tree {
 
             match compare_intervals(b1, &b2) {
                 IdOrderingRelation::B1AfterB2 => {
-                    // println!("B1 {:?} is after B2 {:?}, going right", b1.base, b2.base);
                     let from_node = &mut self.nodes[from];
                     if let Some(r) = from_node.right {
                         from = r;
@@ -389,7 +419,6 @@ impl Tree {
                     } 
                 },
                 IdOrderingRelation::B1BeforeB2 => {
-                    // println!("B1 {:?} is before B2 {:?}, going left", b1.base, b2.base);
                     let from_node = &mut self.nodes[from];
                     if let Some(l) = from_node.left {
                         from = l;
@@ -399,7 +428,6 @@ impl Tree {
                     }
                 },
                 IdOrderingRelation::B1InsideB2 => {
-                    // println!("B1 {:?} is inside B2 {:?}, splitting", b1.base, b2.base);
                     // Split the node and insert in the middle
                     // Find the split point 
                     let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content) = {
@@ -435,15 +463,12 @@ impl Tree {
                     con = false;
                 },
                 IdOrderingRelation::B2ConcatB1 => {
-                    // println!("B2 {:?} is a concat of B1 {:?}, trying to concat", b2.base, b1.base);
                     // Concat at the end
                     // We should also check if we are at upper edge of offsets for this block
                     // As a rule, we will not reinsert IDs which have already been inserted & deleted 
                     // check base to offsets map 
                     if let Some((_, hi)) = self.base_to_offsets.get(&b2.base.to_string()) {
                         if node_idi.lo < *hi {
-                            // println!("B1: {:?} with offsets {}-{}, B2: {:?} with offsets {}-{}", b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi);
-                            // println!("Base to offsets map entry for B2 base {:?} is {}-{}", b2.base, self.base_to_offsets.get(&b2.base.to_string()).unwrap().0, self.base_to_offsets.get(&b2.base.to_string()).unwrap().1);
                             let from_node = &mut self.nodes[from];
                             if let Some(r) = from_node.right {
                                 from = r;
@@ -456,7 +481,6 @@ impl Tree {
                     }
                     // Also check if we actually own this 
                     if self.node_creator(from) != site {
-                        println!("I would love to but I can't extend it mon ami!");
                         let from_node = &mut self.nodes[from];
                         if let Some(r) = from_node.right {
                                 from = r;
@@ -495,12 +519,9 @@ impl Tree {
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
-                    println!("Unexpected case: B2 {:?} is inside B1 {:?} during insert_rec, this should have been caught by the B1InsideB2 case", b2, b1);
-                    panic!("Oops...");
+                    panic!("Unexpected case: B2 {:?} is inside B1 {:?} during insert_rec, this should never be generated", b2, b1);
                 },
                 IdOrderingRelation::B1ConcatB2 => {
-                    // println!("B1 {:?} ({} - {}) is a concat of B2 {:?} ({} - {}), trying to concat", b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi);
-                    // panic!("Oops 2, we never generate this operation")
                     let from_node = &mut self.nodes[from];
                     if let Some(l) = from_node.left {
                         from = l;
@@ -752,7 +773,7 @@ impl Tree {
             let (lo, hi) = (node.offset, node.offset + node.size as u32);
             if let Some(prev) = prev_id {
                 if curr_id.with_offset(lo) <= prev.with_offset(prev_offsets.unwrap().1-1) {
-                    println!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
+                    eprintln!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
                     return false;
                 }
             }

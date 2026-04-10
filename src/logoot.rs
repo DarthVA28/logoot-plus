@@ -5,12 +5,13 @@ pub mod operation;
 pub mod state;
 
 use std::collections::HashMap;
+use std::os::unix::process;
 
 use crate::tree::{DelLocation, Tree};
 use crate::identifier::{Id, Identifier, MAX_VALUE, Range, generate_base, num_insertable};
 use crate::state::State;
 use crate::operation::{OpLog, Operation, OperationType};
-use rand::{RngExt, SeedableRng};
+// use rand::{RngExt, SeedableRng};
 
 #[derive(Clone)]
 pub struct Document { 
@@ -19,6 +20,7 @@ pub struct Document {
     used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
     oplog: OpLog,
+    debug: bool,
 }
 
 impl Document {
@@ -29,37 +31,30 @@ impl Document {
             used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
             oplog: OpLog::new(),
+            debug: false,
         }
     }
 
     pub fn ins(&mut self, pos: usize, text: String) {
-        println!("Inserting '{}' at position {} in doc {}", text, pos, self.state.replica);
-        println!("Before insert::");
-        self.blocks.print_tree();
         let op = local_insert(self, pos, text);
-        if !self.blocks.check_tree() {
-            println!("Corrupted tree structure::");
-            self.blocks.print_tree();
-            panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
+        if self.debug {
+            if !self.blocks.check_tree() {
+                self.blocks.print_tree();
+                panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
+            }
         }
-        println!("After insert::");
-        self.blocks.print_tree();
         self.oplog.record_op(op);
         self.state.local_clock += 1;
     }
 
     pub fn del(&mut self, _from: usize, _to: usize) {
-        println!("Deleting from position {} to {} in doc {}", _from, _to, self.state.replica);
-        println!("Before delete::");
-        self.blocks.print_tree();
         let op = local_delete(self, _from, _to);
-        if !self.blocks.check_tree() {
-            println!("Corrupted tree structure::");
-            self.blocks.print_tree();
-            panic!("Tree structure is invalid after local delete from {} to {} at site {}", _from, _to, self.state.replica);
+        if self.debug {
+            if !self.blocks.check_tree() {
+                self.blocks.print_tree();
+                panic!("Tree structure is invalid after local delete from {} to {} at site {}", _from, _to, self.state.replica);
+            }
         }
-        println!("After delete::");
-        self.blocks.print_tree();
         self.oplog.record_op(op);
         self.state.local_clock += 1;
     }
@@ -83,22 +78,12 @@ impl Document {
                 continue;
             }
 
-            println!("Applying operation: {:?} from site {}", op, op.site);
-            println!("Before applying this operation, state of document:");
-            self.blocks.print_tree();
-
             // We are ready to apply this operation, first record it in the oplog and then apply it
             match op.op_type {
                 OperationType::Insert => remote_insert(self, &op),
                 OperationType::Delete => remote_delete(self, &op)
             }
-
-            println!("State of document after applying this operation:");
-            self.blocks.print_tree();
-            if !self.blocks.check_tree() {
-                panic!("Tree structure is invalid after applying operation {:?} from site {}", op, op.site);
-            }
-
+            
             self.oplog.record_op(op.clone());
         }
     }
@@ -170,57 +155,24 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
     let lcontent = content.chars().take(sp as usize).collect::<String>();
     let rcontent = content.chars().skip(sp as usize).collect::<String>();
     
-    // FIXME
-    // println!("Splitting block with id {:?} at split point {}, left content '{}', right content '{}'", base_id, sp, lcontent, rcontent);
     let res = doc.blocks.delete_by_id(base_id.clone(), offsets.0);
-    // println!("After deleting the block to split:");
-    // doc.blocks.print_tree();
-    if !doc.blocks.check_tree() {
-        println!("Corrupted tree structure::");
-        doc.blocks.print_tree();
-        panic!("Tree structure is invalid after deletion in split & insert");
-    }
-
     if res.is_err() {
         panic!("Error deleting block during split");
     }
 
-    doc.blocks.insert_by_id(owner, base_id.clone(), offsets.0, lcontent.clone());
-    // println!("After inserting left split block:");
-    // doc.blocks.print_tree();
-    if !doc.blocks.check_tree() {
-        println!("Corrupted tree structure after insert1");
-        doc.blocks.print_tree();
-        panic!("Tree structure is invalid111");
-    }
-    
+    doc.blocks.insert_by_id(owner, base_id.clone(), offsets.0, lcontent.clone());    
     doc.blocks.insert_by_id(owner, base_id.clone(), offsets.0 + sp, rcontent.clone());
-    // println!("After inserting right split block:");
-    // doc.blocks.print_tree();
-    if !doc.blocks.check_tree() {
-        println!("Corrupted tree structure after insert2");
-        doc.blocks.print_tree();
-        panic!("Tree structure is invalid222");
-    }
 
     // Insert the new block in between
     let id_low = base_id.with_offset(offsets.0 + sp - 1);
     let id_high = base_id.with_offset(offsets.0 + sp);
 
-    let new_id = if let Some(id) = id {
+    let new_id: Identifier = if let Some(id) = id {
         id.clone()
     } else {
         generate_base(&id_low, &id_high, &mut doc.state)
     };
-    // println!("Split block id is {:?}, inserting new block with id {:?} and text '{}' between {:?} and {:?}", base_id, new_id, text, id_low, id_high);
     doc.blocks.insert_by_id(site, new_id.clone(), 0, text.clone());
-    // println!("After inserting new block in split:");
-    // doc.blocks.print_tree();
-    if !doc.blocks.check_tree() {
-        println!("Corrupted tree structure after insert3");
-        doc.blocks.print_tree();
-        panic!("Tree structure is invalid333");
-    }
     return Operation 
     { op_type: OperationType::Insert, 
         ids: vec![(new_id, vec![0])], 
@@ -233,8 +185,6 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
 fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // Invariant: Size of text passed to the localInsert is less than MAXVALUE 
     assert!(text.chars().count() as u32 <= MAX_VALUE);
-
-    // println!("-----\n Local insert on site {} at position {} with text '{}'", doc.state.replica, pos, text);
 
     let (path, covered) = doc.blocks.find_by_pos(pos);
     if path.is_empty() {
@@ -249,17 +199,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // And we are the creator and the block endpoint is maximal 
     let block_start = covered;
     let block_end = block_start + doc.blocks.node_size(Some(*block));
-    // println!("found id: {:?} blockstart: {}, blockend: {}, pos: {}", block_base, block_start, block_end, pos);
     if pos == block_end {
        if doc.blocks.node_creator(*block) == doc.state.replica {
-            // Check if the offset is maximal for the block 
             let block_ranges = doc.blocks.node_ranges(*block);
             // FIXME MAYBE, changed node_base_offsets
             let base_ranges = doc.blocks.node_base_offsets(*block);
-            // println!("Checking if we can extend the block: block ranges: {:?}, base ranges: {:?}", block_ranges, base_ranges);
             if block_ranges.1 == base_ranges.1 {
-                // We can extend this block 
-                // println!("Extending block {} with id {:?} ", block, block_base);
                 return extend_block(doc, text, *block, &path, doc.state.replica);
             }
        }
@@ -275,7 +220,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
             let next_ranges = doc.blocks.node_ranges(next_block);
             next_base.with_offset(next_ranges.0)
         };
-        // println!("Inserting new block after block {} with id {:?}, id_low: {:?}, id_high: {:?}", block, block_base, id_low, id_high);
         return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
     }
 
@@ -299,7 +243,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     if (sp > block_ranges.1 - block_ranges.0) || (sp == 0) {
         panic!("Invalid split point - split point: {}, block size: {}", sp, block_ranges.1 - block_ranges.0);
     }
-    // println!("Inserting in the middle, splitting block {} at split point {}", block, sp);
     return split_and_insert_block(doc, text, *block, &path, sp, doc.state.replica, None);
 }
 
@@ -348,7 +291,7 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     let curr = from;
 
     while num_delete > 0 {
-        let (path, covered) = doc.blocks.find_by_pos(curr);
+        let (path, covered) = doc.blocks.find_by_pos_delete(curr);
         if path.is_empty() {
             panic!("Cannot delete from an empty document");
         }
@@ -357,16 +300,9 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
         let mut indices : Vec<(Id, Vec<u32>)> = vec![];
         let offset = covered;
         let block_size = doc.blocks.node_size(Some(block));
-
-        // doc.blocks.print_tree();
-
-        println!("Curr and offset are: {}, {}", curr, offset);
-        println!("Block is: {} with content '{}'", block, doc.blocks.node_content(Some(block)));
         
         let start_del = curr - offset;
-        let end_del = to - offset;
-
-        // println!("start_del: {}, end_del: {}", start_del, end_del);
+        let end_del = start_del + num_delete;
 
         let base_id = doc.blocks.node_base_id(block);
         let block_ranges = doc.blocks.node_ranges(block);
@@ -375,7 +311,6 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
             let del_offsets = (block_ranges.0..block_ranges.1).collect::<Vec<u32>>();
             indices.push((base_id.clone(), del_offsets));
             num_delete -= block_size;
-            // curr += block_size;
             let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
             if res.is_err() {
                 panic!("Error deleting block");
@@ -388,10 +323,6 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
             num_delete = 0;
         } else if end_del >= block_size {
             // Case 3: delete some chars from the end of the block
-            // for i in start_del..block_size {
-            //     indices.push(base_id.clone());
-            //     offsets.push(block_ranges.0 + i);
-            // }
             let del_offsets = (block_ranges.0+start_del as u32..block_ranges.1).collect::<Vec<u32>>();
             indices.push((base_id.clone(), del_offsets));
             doc.blocks.truncate_content(block, block_size - start_del, DelLocation::End, &path);
@@ -418,36 +349,54 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
     let del_ids = &op.ids;
 
     for (id, offsets) in del_ids {
-        // Find the block with this base ID + first (smallest) offset
-        let path = doc.blocks.find_by_id(id.clone(), offsets[0]);
-        if path.is_empty() {
-            continue;
-        }
-        // Verify if the base id of the blocks are the same else continue 
-        if doc.blocks.node_base_id(*path.last().unwrap()) != id {
-            continue;
-        }
-        let block: usize = *path.last().unwrap();
-        let base_id = doc.blocks.node_base_id(block);
-        let block_ranges = doc.blocks.node_ranges(block);
-        let block_size = block_ranges.1 - block_ranges.0;
-        let offset = offsets[0];
-        let n_delete = offsets.len();
         
-        // Same 4 cases as local delete
-        if offset == block_ranges.0 && offsets.len() as u32 >= block_size {
-            // Case 1: delete the entire block 
-            let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
-            if res.is_err() {
-                panic!("Error deleting block during remote delete");
+        let mut processed = 0;
+        while processed < offsets.len() {
+            // Find the block with this base ID + first (smallest) offset
+            let path = doc.blocks.find_by_id(id.clone(), offsets[processed]);
+            if path.is_empty() {
+                // Assume already 
+                processed += 1;
+                continue;
             }
-        } else if offset == block_ranges.0 {
-            doc.blocks.truncate_content(block, n_delete, DelLocation::Start, &path);
-        } else if offset + n_delete as u32 >= block_ranges.1 {
-            doc.blocks.truncate_content(block, n_delete, DelLocation::End, &path);
-        } else {
-            let sp = (offset - block_ranges.0) as usize;
-            delete_and_split(doc, block, &path, sp, n_delete);
+            // Verify if the base id of the blocks are the same else continue 
+            if doc.blocks.node_base_id(*path.last().unwrap()) != id {
+                // FIXME: May need to be handled separately
+                eprintln!("Base ID of the block does not match the ID in delete operation, skipping this offset");
+                processed += 1;
+                continue;
+            }
+            let block: usize = *path.last().unwrap();
+            let base_id = doc.blocks.node_base_id(block);
+            let block_ranges = doc.blocks.node_ranges(block);
+            let block_size = block_ranges.1 - block_ranges.0;
+            let offset = offsets[processed];
+            // let n_delete = offsets.len();
+
+            // Count how many of the remaining offsets fall inside this node.
+            // Offsets are always a contiguous range, and this node covers
+            // [block_ranges.0, block_ranges.1), so a simple take_while works.
+            let n_in_block = offsets[processed..]
+                .iter()
+                .take_while(|&&o| o >= block_ranges.0 && o < block_ranges.1)
+                .count();
+            
+            // Same 4 cases as local delete
+            if offset == block_ranges.0 && n_in_block >= block_size as usize {
+                // Case 1: delete the entire block 
+                let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
+                if res.is_err() {
+                    panic!("Error deleting block during remote delete");
+                }
+            } else if offset == block_ranges.0 {
+                doc.blocks.truncate_content(block, n_in_block, DelLocation::Start, &path);
+            } else if offset + n_in_block as u32 >= block_ranges.1 {
+                doc.blocks.truncate_content(block, n_in_block, DelLocation::End, &path);
+            } else {
+                let sp = (offset - block_ranges.0) as usize;
+                delete_and_split(doc, block, &path, sp, n_in_block);
+            }
+            processed += n_in_block;
         }
     }
 }
@@ -516,101 +465,6 @@ fn test_interleaved_inserts() {
 }
 
 #[allow(dead_code)]
-fn run_insert_only(seed: u64) {
-    use rand::{SeedableRng, RngExt};
-    use rand::rngs::StdRng;
-
-    let mut rng = StdRng::seed_from_u64(seed);
-
-    let mut docs = vec![
-        Document::new(0),
-        Document::new(1),
-        Document::new(2),
-    ];
-
-    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
-
-    for i in 0..200 {
-        println!("iteration {}", i);
-        // random insert
-        let i = rng.random_range(0..docs.len());
-        let doc = &mut docs[i];
-
-        let len = doc.read().chars().count();
-        let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
-
-        // Generate random string of length 1 to 5
-        // let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
-        let str_len = rng.random_range(1..=3);
-        let ch = (0..str_len).map(|_| alphabet[rng.random_range(0..alphabet.len())]).collect::<String>();
-
-        // let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
-
-        // println!("Before inserting in doc {}", doc.state.replica);
-        // doc.blocks.print_tree();
-        // println!("Inserting '{}' at position {} in doc {}", ch, pos, doc.state.replica);
-        doc.ins(pos, ch);
-        // println!("After inserting in doc {}", doc.state.replica);
-        // doc.blocks.print_tree();
-
-        // random merge
-        let a = rng.random_range(0..docs.len());
-        let b = rng.random_range(0..docs.len());
-
-        // let a = 0;
-        // let b = 1;
-
-        if a == b { continue; }
-
-        let (left, right) = if a < b {
-            let (l, r) = docs.split_at_mut(b);
-            (&mut l[a], &mut r[0])
-        } else {
-            let (l, r) = docs.split_at_mut(a);
-            (&mut r[0], &mut l[b])
-        };
-
-        let clone = right.clone();
-        left.merge_from(&clone);
-        
-        let clone2 = left.clone();
-        right.merge_from(&clone2);
-
-        // println!("After merging, state of {}: ", left.state.replica);
-        // left.blocks.print_tree();
-        // println!("After merging, state of {}: ", right.state.replica);
-        // right.blocks.print_tree();
-
-        if left.read() != right.read() {
-            println!("Divergence detected at seed {}!", seed);
-            println!("{} content: ", left.state.replica);
-            left.blocks.print_tree();   
-            println!("---");
-            println!("{} content: ", right.state.replica);
-            right.blocks.print_tree();
-        }
-
-        assert_eq!(
-            left.read(),
-            right.read(),
-            "Seed {} diverged\n{} vs {}",
-            seed,
-            left.read(),
-            right.read()
-        );
-    }
-}
-
-// #[test]
-// fn test_insert_100_seeds() {
-//     // run_insert_only(472);
-//     for i in 0..100 {
-//         println!("Running seed {}", i);
-//         run_insert_only(i);
-//     }
-// }
-
-#[allow(dead_code)]
 fn run_insert_delete(seed: u64) {
     use rand::{SeedableRng, RngExt};
     use rand::rngs::StdRng;
@@ -626,7 +480,6 @@ fn run_insert_delete(seed: u64) {
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
 
     for j in 0..200 {
-        println!("iteration {}", j);
         let i = rng.random_range(0..docs.len());
         let doc = &mut docs[i];
         let len = doc.read().chars().count();
@@ -635,7 +488,6 @@ fn run_insert_delete(seed: u64) {
         if len > 0 && rng.random_range(0..10) < 3 {
             let from = rng.random_range(0..len);
             let to = rng.random_range(from+1..=len);
-            // println!("Deleting from position {} to {} in doc {}", from, to, doc.state.replica);
             doc.del(from, to);
         } else {
             let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
@@ -662,11 +514,6 @@ fn run_insert_delete(seed: u64) {
         let clone2 = left.clone();
         right.merge_from(&clone2);
 
-        println!("After merging, state of {}: ", left.state.replica);
-        left.blocks.print_tree();
-        println!("After merging, state of {}: ", right.state.replica);
-        right.blocks.print_tree();
-
         if left.read() != right.read() {
             println!("Divergence detected at seed {}!", seed);
             left.blocks.print_tree();   
@@ -687,7 +534,7 @@ fn run_insert_delete(seed: u64) {
 
 #[test]
 fn test_insert_delete_heavy() {
-    for i in 0..100 {
+    for i in 0..1000 {
         println!("Running seed {}", i); 
         run_insert_delete(i);
     }
