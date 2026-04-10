@@ -49,6 +49,7 @@ pub fn generate_base(id_low: &Id, id_high: &Id, state: &mut State) -> Id {
     let mut base = Vec::new();
     let mut low_iter = id_low.id.iter();
     let mut high_iter = id_high.id.iter();
+    // println!("Generating base between {:?} and {:?}", id_low, id_high);
     
     let mut l = *low_iter.next().unwrap_or(&MIN_VALUE);
     let mut h = *high_iter.next().unwrap_or(&MAX_VALUE);
@@ -124,9 +125,9 @@ pub fn compare_intervals(b1: &IdentifierInterval, b2: &IdentifierInterval) -> Id
 
     // Different bases -- check if bases fall in each other's range
     let b1_start: Identifier = b1.id_begin();
-    let b1_end = b1.id_end();
+    let _b1_end = b1.id_end();
     let b2_start = b2.id_begin();
-    let b2_end: Identifier = b2.id_end();
+    let _b2_end: Identifier = b2.id_end();
 
     // Containment checks 
     if b1.contains(&b2.id_begin()) {

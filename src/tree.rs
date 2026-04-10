@@ -1,9 +1,7 @@
 use core::panic;
 use std::collections::HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, generate_base, num_insertable};
-use crate::state::State;
-use crate::operation::{Operation, OperationType, OpId, OpLog};
+use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, num_insertable};
 
 #[derive(Clone)]
 pub struct Tree {
@@ -97,10 +95,19 @@ impl Tree {
     }
 
     pub fn node_base_offsets(&self, node: usize) -> (u32, u32) { 
-        let n = &self.nodes[node];
-        let offset_left = n.offset;
-        let offset_right = n.offset + n.size as u32;
-        (offset_left, offset_right)
+        // Get the offsets from the map
+        let base_str = self.nodes[node].base_id.to_string();
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_str) {
+            return (*lo, *hi)
+        } else {
+            panic!("Base offsets not found for node {}, this should not happen", node);
+            // If not found, return the node's own offsets
+            // return self.node_ranges(node)
+        }
+        // let n = &self.nodes[node];
+        // let offset_left = n.offset;
+        // let offset_right = n.offset + n.size as u32;
+        // (offset_left, offset_right)
     }
 
     pub fn node_get_identifier_interval(&self, node: usize) -> IdentifierInterval { 
@@ -331,6 +338,8 @@ impl Tree {
         }
         let from = self.root.unwrap();
         let len = content.chars().count() as u32;
+        let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
+        self.insert_rec(idx, insert_interval, from, content, site);
         // Lookup in base to offsets map and modify the offsets accordingly
         if let Some((lo, hi)) = self.base_to_offsets.get(&base.to_string()) {
             // Modify the offsets accordingly
@@ -339,8 +348,6 @@ impl Tree {
         } else {
             self.base_to_offsets.insert(base.to_string(), (offset, offset + len));
         }
-        let insert_interval = IdentifierInterval::new(base, offset, offset + len);
-        return self.insert_rec(idx, insert_interval, from, content);
     }
 
     fn find_split_point(node_idi: &IdentifierInterval, id_insert: &Id) -> u32 {
@@ -358,7 +365,7 @@ impl Tree {
         return sp;
     }
 
-    pub fn insert_rec(&mut self, node: usize, node_idi: IdentifierInterval, mut from: usize, content: String) {
+    pub fn insert_rec(&mut self, node: usize, node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
         let mut path = vec![];
         let mut con = true;
 
@@ -430,6 +437,35 @@ impl Tree {
                 IdOrderingRelation::B2ConcatB1 => {
                     // println!("B2 {:?} is a concat of B1 {:?}, trying to concat", b2.base, b1.base);
                     // Concat at the end
+                    // We should also check if we are at upper edge of offsets for this block
+                    // As a rule, we will not reinsert IDs which have already been inserted & deleted 
+                    // check base to offsets map 
+                    if let Some((_, hi)) = self.base_to_offsets.get(&b2.base.to_string()) {
+                        if node_idi.lo < *hi {
+                            // println!("B1: {:?} with offsets {}-{}, B2: {:?} with offsets {}-{}", b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi);
+                            // println!("Base to offsets map entry for B2 base {:?} is {}-{}", b2.base, self.base_to_offsets.get(&b2.base.to_string()).unwrap().0, self.base_to_offsets.get(&b2.base.to_string()).unwrap().1);
+                            let from_node = &mut self.nodes[from];
+                            if let Some(r) = from_node.right {
+                                from = r;
+                                continue;
+                            } else {
+                                from_node.right = Some(node);
+                                break;
+                            }
+                        }
+                    }
+                    // Also check if we actually own this 
+                    if self.node_creator(from) != site {
+                        println!("I would love to but I can't extend it mon ami!");
+                        let from_node = &mut self.nodes[from];
+                        if let Some(r) = from_node.right {
+                                from = r;
+                                continue;
+                            } else {
+                                from_node.right = Some(node);
+                                break;
+                            }
+                    }
                     let nxt = self.next(from, &path);
                     if let Some(r) = nxt {
                         // See how much we can insert before clashing with the next ID
@@ -437,12 +473,12 @@ impl Tree {
                         let r_offset = self.node_ranges(r).0;
                         let len = content.chars().count() as u32;
                         let n_insertable= num_insertable(&node_idi.base.with_offset(node_idi.lo), &r_base.with_offset(r_offset), len);
+                        let from_node = &mut self.nodes[from];
                         if n_insertable < len {
                             // FIXME: just go right, don't bother splitting for now
-                            from = self.nodes[from].right.unwrap();
+                            from = from_node.right.unwrap();
                         } else {
                             // CHECK 
-                            let from_node = &mut self.nodes[from];
                             from_node.content.push_str(&content);
                             from_node.size = from_node.content.chars().count();
                             con = false;
@@ -545,6 +581,7 @@ impl Tree {
                 tn.base_id = succ_payload.base_id;
                 tn.offset  = succ_payload.offset;
                 tn.size    = succ_payload.size;
+                tn.creator = succ_payload.creator;
 
                 let succ_right = self.nodes[succ].right;
                 self.splice(&succ_path, succ, succ_right);
@@ -583,7 +620,7 @@ impl Tree {
                         break;    
                     }
                 },
-                IdOrderingRelation::B1InsideB2 => {
+                IdOrderingRelation::B1InsideB2 | IdOrderingRelation::B1EqualsB2 => {
                     // Found the block, return the path to it 
                     return path;
                 }

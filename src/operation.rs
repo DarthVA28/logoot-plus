@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 
-use crate::identifier::{Id, Identifier};
+use crate::identifier::Id;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 
