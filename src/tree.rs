@@ -101,13 +101,7 @@ impl Tree {
             return (*lo, *hi)
         } else {
             panic!("Base offsets not found for node {}, this should not happen", node);
-            // If not found, return the node's own offsets
-            // return self.node_ranges(node)
         }
-        // let n = &self.nodes[node];
-        // let offset_left = n.offset;
-        // let offset_right = n.offset + n.size as u32;
-        // (offset_left, offset_right)
     }
 
     pub fn node_get_identifier_interval(&self, node: usize) -> IdentifierInterval { 
