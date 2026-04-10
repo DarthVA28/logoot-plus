@@ -24,7 +24,7 @@ pub struct OpId {
     pub clock: u32
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OpLog { 
     pub ops: Vec<Operation>, 
     index: HashSet<OpId>, 

@@ -3,7 +3,7 @@
 // Code adapted from Seph Gentle's tutorial on eg-walker 
 // https://github.com/josephg/egwalker-from-scratch
 
-import { Document } from "./logoot.js"
+import init, { Document } from "./pkg/logoot_plus.js"
 
 type DiffResult = { pos: number, del: number, ins: string }
 
@@ -73,7 +73,7 @@ const attachEditor = (agentName: number, elemName: string) => {
     lastValue = doc.read()
     elem.value = lastValue
 
-    console.log(doc.blocks)
+    console.log(doc.getDebugBlocks())
   })
 
   return {
@@ -97,23 +97,30 @@ const attachEditor = (agentName: number, elemName: string) => {
   }
 }
 
-window.onload = () => {
-  const a = attachEditor(0, 'text1')
-  const b = attachEditor(1, 'text2')
+window.onload = async () => {
+  try {
+    // This fetches the .wasm binary and prepares the Document class.
+    // The path must point to the file inside your pkg folder.
+    await init("./pkg/logoot_plus_bg.wasm");
+    console.log('WASM Backend Ready!');
 
-  elemById('reset').onclick = () => {
-    console.log('reset')
-    a.reset()
-    b.reset()
+    const a = attachEditor(0, 'text1');
+    const b = attachEditor(1, 'text2');
+
+    elemById('reset').onclick = () => {
+      a.reset();
+      b.reset();
+    };
+
+    elemById('pushLeft').onclick = () => {
+      a.mergeFrom(b.doc);
+    };
+
+    elemById('pushRight').onclick = () => {
+      b.mergeFrom(a.doc);
+    };
+
+  } catch (err) {
+    console.error("Failed to initialize the Logoot engine:", err);
   }
-
-  elemById('pushLeft').onclick = () => {
-    a.mergeFrom(b.doc)
-  }
-
-  elemById('pushRight').onclick = () => {
-    b.mergeFrom(a.doc)
-  }
-
-  console.log('OK!')
-}
+};

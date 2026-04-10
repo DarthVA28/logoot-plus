@@ -3,9 +3,9 @@ pub mod identifier;
 pub mod node;
 pub mod operation;
 pub mod state;
+pub mod wasm;
 
 use std::collections::HashMap;
-use std::os::unix::process;
 
 use crate::tree::{DelLocation, Tree};
 use crate::identifier::{Id, Identifier, MAX_VALUE, Range, generate_base, num_insertable};
@@ -13,7 +13,7 @@ use crate::state::State;
 use crate::operation::{OpLog, Operation, OperationType};
 // use rand::{RngExt, SeedableRng};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Document { 
     blocks: Tree,
     state: State,

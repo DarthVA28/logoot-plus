@@ -1,6 +1,6 @@
 use crate::identifier::{Id, Identifier, Range};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Node {
     pub left: Option<usize>, 
     pub right: Option<usize>,

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::node::Node;
 use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, num_insertable};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Tree {
     pub nodes: Vec<Node>, 
     pub root: Option<usize>,
