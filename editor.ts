@@ -97,30 +97,37 @@ const attachEditor = (agentName: number, elemName: string) => {
   }
 }
 
+// ... (keep calcDiff, elemById, and attachEditor exactly as they are) ...
+
 window.onload = async () => {
   try {
-    // This fetches the .wasm binary and prepares the Document class.
-    // The path must point to the file inside your pkg folder.
     await init("./pkg/logoot_plus_bg.wasm");
     console.log('WASM Backend Ready!');
 
     const a = attachEditor(0, 'text1');
     const b = attachEditor(1, 'text2');
+    const c = attachEditor(2, 'text3');
+
+    // Helper to wire up buttons quickly
+    const wire = (btnId: string, target: any, source: any) => {
+      elemById(btnId).onclick = () => target.mergeFrom(source.doc);
+    };
+
+    // Pairwise Merges
+    wire('2to1', a, b);
+    wire('3to1', a, c);
+    
+    wire('1to2', b, a);
+    wire('3to2', b, c);
+    
+    wire('1to3', c, a);
+    wire('2to3', c, b);
 
     elemById('reset').onclick = () => {
-      a.reset();
-      b.reset();
-    };
-
-    elemById('pushLeft').onclick = () => {
-      a.mergeFrom(b.doc);
-    };
-
-    elemById('pushRight').onclick = () => {
-      b.mergeFrom(a.doc);
+      a.reset(); b.reset(); c.reset();
     };
 
   } catch (err) {
-    console.error("Failed to initialize the Logoot engine:", err);
+    console.error("Initialization failed:", err);
   }
 };

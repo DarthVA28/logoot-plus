@@ -479,7 +479,7 @@ fn run_insert_delete(seed: u64) {
 
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
 
-    for j in 0..200 {
+    for _ in 0..200 {
         let i = rng.random_range(0..docs.len());
         let doc = &mut docs[i];
         let len = doc.read().chars().count();
