@@ -24,7 +24,7 @@ impl WasmDocument {
         self.inner.del(from, to);
     }
 
-    pub fn read(&self) -> String {
+    pub fn read(&mut self) -> String {
         self.inner.read()
     }
 

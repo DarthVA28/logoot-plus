@@ -1,18 +1,16 @@
 use std::collections::{HashSet, HashMap};
+use crate::identifier::Identifier;
 
-use crate::identifier::Id;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OperationType {
     Insert,
     Delete
 }   
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Operation { 
     pub op_type: OperationType,
-    pub ids: Vec<(Id, Vec<u32>)>,
+    pub ids: Vec<(Identifier, Vec<u32>)>,
     pub payload: Option<String>,
     pub site: u32, 
     pub clock: u32
@@ -88,5 +86,8 @@ impl OpLog {
         self.v_clock.clear();
         self.pending.clear();
     }
-}
 
+    pub fn export(&self) -> Vec<Operation> {
+        self.ops.clone()
+    }
+}
