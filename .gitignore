@@ -1,1 +1,6 @@
 /target
+.vscode
+node_modules
+Cargo.lock
+bundle.js
+bench.md

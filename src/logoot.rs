@@ -21,6 +21,7 @@ pub struct Document {
     snapshot: String,
     oplog: OpLog,
     debug: bool,
+    fresh: bool,
 }
 
 impl Document {
@@ -32,10 +33,19 @@ impl Document {
             snapshot: String::new(),
             oplog: OpLog::new(),
             debug: false,
+            fresh: true,
         }
     }
 
+    pub fn set_replica(&mut self, replica_id: u32) {
+        self.state.replica = replica_id;
+    }
+
     pub fn ins(&mut self, pos: usize, text: String) {
+        if text == "" {
+            // For empty inserts   
+            return;
+        }
         let op = local_insert(self, pos, text);
         if self.debug {
             if !self.blocks.check_tree() {
@@ -45,25 +55,32 @@ impl Document {
         }
         self.oplog.record_op(op);
         self.state.local_clock += 1;
+        self.fresh = false;
     }
 
-    pub fn del(&mut self, _from: usize, _to: usize) {
-        let op = local_delete(self, _from, _to);
+    pub fn del(&mut self, from: usize, to: usize) {
+        let op = local_delete(self, from, to);
         if self.debug {
             if !self.blocks.check_tree() {
                 self.blocks.print_tree();
-                panic!("Tree structure is invalid after local delete from {} to {} at site {}", _from, _to, self.state.replica);
+                panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
         self.oplog.record_op(op);
         self.state.local_clock += 1;
+        self.fresh = false;
     }
 
-    pub fn read(&self) -> String {
+    pub fn read(&mut self) -> String {
+        if self.fresh {
+            return self.snapshot.clone();
+        }
         let mut res = String::new();
         for block in self.blocks.inorder_iter() {
             res.push_str(&block.content);
         }
+        self.snapshot = res.clone();
+        self.fresh = true;
         res
     }
 
@@ -85,14 +102,63 @@ impl Document {
             }
             
             self.oplog.record_op(op.clone());
+
+            if self.debug {
+                if !self.blocks.check_tree() {
+                    self.blocks.print_tree();
+                    panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
+                }
+            }
         }
+        self.fresh = false;
     }
 
+    
+    pub fn enable_debug(&mut self) {
+        self.debug = true;
+    }
+
+    pub fn disable_debug(&mut self) {
+        self.debug = false;
+    }
+
+    /* Public API for benchmarking */
     pub fn reset (&mut self) {
         self.blocks.clear();
         self.used_ranges_for_id.clear();
         self.snapshot.clear();
         self.oplog.clear();
+    }
+
+    pub fn export_ops(&self) -> Vec<Operation> {
+        self.oplog.export()
+    }
+
+    pub fn apply_remote_ops(&mut self, ops: &[Operation]) {
+        for op in ops {
+            if self.oplog.is_recorded(op) {
+                continue;
+            }
+
+            if !self.oplog.is_ready(&op) {
+                self.oplog.add_pending(op.clone());
+                continue;
+            }
+
+            // We are ready to apply this operation, first record it in the oplog and then apply it
+            match op.op_type {
+                OperationType::Insert => remote_insert(self, &op),
+                OperationType::Delete => remote_delete(self, &op)
+            }
+            
+            self.oplog.record_op(op.clone());
+        }
+    }
+
+    pub fn import_ops(replica_id: u32, ops: &[Operation]) -> Self {
+        let mut doc = Document::new(replica_id);
+        doc.apply_remote_ops(ops);
+        doc
     }
 }
 
@@ -184,7 +250,11 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
 
 fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // Invariant: Size of text passed to the localInsert is less than MAXVALUE 
-    assert!(text.chars().count() as u32 <= MAX_VALUE);
+    // assert!(text.chars().count() as u32 <= MAX_VALUE);
+
+    // Make pos the end of the document if it is greater than the document size
+    let doc_size = doc.read().chars().count();
+    let pos = if pos > doc_size { doc_size } else { pos };
 
     let (path, covered) = doc.blocks.find_by_pos(pos);
     if path.is_empty() {
@@ -241,6 +311,10 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // Split the block at the position and insert a new block in between
     let sp = (pos - block_start) as u32;
     if (sp > block_ranges.1 - block_ranges.0) || (sp == 0) {
+        // println!("invalid split point during insertion - block id is {:?}, block ranges are {:?}, split point is {}", doc.blocks.node_base_id(*block), doc.blocks.node_ranges(*block), sp);
+        // println!("Pos was: {}, block start was {}, block end was {}", pos, block_start, block_end);
+        // println!("Length of document content is {}", doc.read().chars().count());
+        doc.blocks.print_tree();
         panic!("Invalid split point - split point: {}, block size: {}", sp, block_ranges.1 - block_ranges.0);
     }
     return split_and_insert_block(doc, text, *block, &path, sp, doc.state.replica, None);

@@ -12,14 +12,6 @@ https://members.loria.fr/CIgnat/files/pdf/AndreCollabCom13.pdf
 cargo build
 ```
 
-## Fuzz Testing
-
-For testing using fuzzer:
-
-```bash
-cargo test
-```
-
 ## Running the Editor
 
 Prerequisites: 
@@ -40,4 +32,12 @@ bun build ./editor.ts --outfile ./bundle.js
 Run the local server:
 ```
 bun x serve .
+```
+
+## Fuzz Testing
+
+For testing using fuzzer:
+
+```bash
+cargo test
 ```
