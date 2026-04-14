@@ -17,7 +17,6 @@ use crate::operation::{OpLog, Operation, OperationType};
 pub struct Document { 
     blocks: Tree,
     state: State,
-    used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
     oplog: OpLog,
     debug: bool,
@@ -29,7 +28,6 @@ impl Document {
         Document {
             blocks: Tree::new(),
             state: State::new(id),
-            used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
             oplog: OpLog::new(),
             debug: false,
@@ -125,7 +123,6 @@ impl Document {
     /* Public API for benchmarking */
     pub fn reset (&mut self) {
         self.blocks.clear();
-        self.used_ranges_for_id.clear();
         self.snapshot.clear();
         self.oplog.clear();
     }
@@ -382,7 +379,8 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
         let block_ranges = doc.blocks.node_ranges(block);
 
         if start_del == 0 && end_del >= block_size {
-            let del_offsets = (block_ranges.0..block_ranges.1).collect::<Vec<u32>>();
+            // let del_offsets = (block_ranges.0..block_ranges.1).collect::<Vec<u32>>();
+            let del_offsets = vec![block_ranges.0, block_ranges.1];
             indices.push((base_id.clone(), del_offsets));
             num_delete -= block_size;
             let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
@@ -391,18 +389,21 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
             }
         } else if start_del == 0 { 
             // Case 2: delete some chars from the start of the block 
-            let del_offsets = (block_ranges.0..block_ranges.0+end_del as u32).collect::<Vec<u32>>();
+            // let del_offsets = (block_ranges.0..block_ranges.0+end_del as u32).collect::<Vec<u32>>();
+            let del_offsets = vec![block_ranges.0, block_ranges.0 + end_del as u32];
             indices.push((base_id.clone(), del_offsets));
             doc.blocks.truncate_content(block, num_delete, DelLocation::Start, &path);
             num_delete = 0;
         } else if end_del >= block_size {
             // Case 3: delete some chars from the end of the block
-            let del_offsets = (block_ranges.0+start_del as u32..block_ranges.1).collect::<Vec<u32>>();
+            // let del_offsets = (block_ranges.0+start_del as u32..block_ranges.1).collect::<Vec<u32>>();
+            let del_offsets = vec![block_ranges.0 + start_del as u32, block_ranges.1];
             indices.push((base_id.clone(), del_offsets));
             doc.blocks.truncate_content(block, block_size - start_del, DelLocation::End, &path);
             num_delete -= block_size - start_del;
         } else {
-            let del_offsets = (block_ranges.0+start_del as u32..block_ranges.0+end_del as u32).collect::<Vec<u32>>();
+            // let del_offsets = (block_ranges.0+start_del as u32..block_ranges.0+end_del as u32).collect::<Vec<u32>>();
+            let del_offsets = vec![block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32];
             indices.push((base_id.clone(), del_offsets));
             delete_and_split(doc, block, &path, start_del, num_delete);
             num_delete = 0;
@@ -421,13 +422,14 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
 
 fn remote_delete(doc: &mut Document, op: &Operation) {
     let del_ids = &op.ids;
-
     for (id, offsets) in del_ids {
-        
         let mut processed = 0;
-        while processed < offsets.len() {
+        let offset_begin = offsets[0];
+        let offset_end = offsets[1];
+        let n_offsets = offset_end - offset_begin;
+        while processed < n_offsets {
             // Find the block with this base ID + first (smallest) offset
-            let path = doc.blocks.find_by_id(id.clone(), offsets[processed]);
+            let path = doc.blocks.find_by_id(id.clone(), offset_begin + processed);
             if path.is_empty() {
                 // Assume already 
                 processed += 1;
@@ -444,31 +446,34 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             let base_id = doc.blocks.node_base_id(block);
             let block_ranges = doc.blocks.node_ranges(block);
             let block_size = block_ranges.1 - block_ranges.0;
-            let offset = offsets[processed];
+            let offset = offset_begin + processed;
             // let n_delete = offsets.len();
 
-            // Count how many of the remaining offsets fall inside this node.
-            // Offsets are always a contiguous range, and this node covers
-            // [block_ranges.0, block_ranges.1), so a simple take_while works.
-            let n_in_block = offsets[processed..]
-                .iter()
-                .take_while(|&&o| o >= block_ranges.0 && o < block_ranges.1)
-                .count();
+            // // Count how many of the remaining offsets fall inside this node.
+            // // Offsets are always a contiguous range, and this node covers
+            // // [block_ranges.0, block_ranges.1), so a simple take_while works.
+            // let n_in_block = offsets[processed..]
+            //     .iter()
+            //     .take_while(|&&o| o >= block_ranges.0 && o < block_ranges.1)
+            //     .count();
+
+            let del_end = offset_end.min(block_ranges.1);
+            let n_in_block = del_end - offset;
             
             // Same 4 cases as local delete
-            if offset == block_ranges.0 && n_in_block >= block_size as usize {
+            if offset == block_ranges.0 && n_in_block >= block_size {
                 // Case 1: delete the entire block 
                 let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
                 if res.is_err() {
                     panic!("Error deleting block during remote delete");
                 }
             } else if offset == block_ranges.0 {
-                doc.blocks.truncate_content(block, n_in_block, DelLocation::Start, &path);
+                doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::Start, &path);
             } else if offset + n_in_block as u32 >= block_ranges.1 {
-                doc.blocks.truncate_content(block, n_in_block, DelLocation::End, &path);
+                doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::End, &path);
             } else {
                 let sp = (offset - block_ranges.0) as usize;
-                delete_and_split(doc, block, &path, sp, n_in_block);
+                delete_and_split(doc, block, &path, sp, n_in_block as usize);
             }
             processed += n_in_block;
         }
