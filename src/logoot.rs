@@ -6,6 +6,7 @@ pub mod state;
 pub mod wasm;
 pub mod document;
 pub mod network;
+pub mod trace_bench;
 
 use document::Document;
 use network::Network;

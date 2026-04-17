@@ -381,6 +381,11 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
             // Case 3: delete some chars from the end of the block
             let del_offsets = (block_ranges.0+start_del as u32..block_ranges.1).collect::<Vec<u32>>();
             indices.push((base_id.clone(), del_offsets));
+            // println!("Blocksize is {}, start_del is {}, num_delete is {}", block_size, start_del, num_delete);
+            // println!("replica is:: {}", doc.state.replica);
+            // println!("doc.blocks:", doc.)
+            // doc.blocks.print_tree();
+            // println!("Size of document is: {}, to and from {} - {}", doc.blocks.tree_size(), from, to);
             doc.blocks.truncate_content(block, block_size - start_del, DelLocation::End, &path);
             num_delete -= block_size - start_del;
         } else {

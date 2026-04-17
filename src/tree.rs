@@ -513,6 +513,7 @@ impl Tree {
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
+                    // TODO: Handle this case for A1 and A2 json
                     panic!("Unexpected case: B2 {:?} is inside B1 {:?} during insert_rec, this should never be generated", b2, b1);
                 },
                 IdOrderingRelation::B1ConcatB2 => {

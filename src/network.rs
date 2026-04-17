@@ -28,7 +28,7 @@ impl Network {
         let op = Arc::new(op);
         for (i, inbox) in self.inboxes.iter_mut().enumerate() {
             if self.documents[i].site_id() != sender {
-                println!("Adding op from site {} to inbox of site {}", sender, self.documents[i].site_id());
+                // println!("Adding op from site {} to inbox of site {}", sender, self.documents[i].site_id());
                 inbox.push(Arc::clone(&op));  
             }
         }
@@ -39,11 +39,11 @@ impl Network {
         let mut remaining = vec![];
         let mut to_apply = vec![];
 
-        println!("Syncing from site {} into site {}", from, into);
+        // println!("Syncing from site {} into site {}", from, into);
 
         for op in self.inboxes[idx].drain(..) {
             if op.site == from {
-                println!("Applying op from site {} to site {}", from, self.documents[idx].site_id());
+                // Kept silent in hot path to avoid benchmark distortion from stdout overhead.
                 to_apply.push(op);
             } else {
                 remaining.push(op);
