@@ -56,6 +56,17 @@ impl Network {
         }
     }
 
+    pub fn sync_all(&mut self) {
+        let sites: Vec<u32> = self.documents.iter().map(|d| d.site_id()).collect();
+        for i in 0..self.documents.len() {
+            for j in 0..self.documents.len() {
+                if i != j {
+                    self.sync_from(sites[i], sites[j]);
+                }
+            }
+        }
+    }
+
     pub fn index_of(&self, site: u32) -> usize {
         self.documents
             .iter()

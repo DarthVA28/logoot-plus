@@ -1,0 +1,35 @@
+{
+  "kind": "concurrent",
+  "endContent": "yoooo ho ho\n",
+  "numAgents": 2,
+  "txns": [
+    {
+      "parents": [],
+      "numChildren": 1,
+      "agent": 0,
+      "time": "2023-11-22T04:49:00+00:00",
+      "patches": [
+        [0, 0, "hi there\n"]
+      ]
+    },
+    {
+      "parents": [0],
+      "numChildren": 1,
+      "agent": 0,
+      "time": "2023-11-22T04:50:00+00:00",
+      "patches": [
+        [0, 8, ""],
+        [0, 0, "yoooo"]
+      ]
+    },
+    {
+      "parents": [1],
+      "numChildren": 0,
+      "agent": 1,
+      "time": "2023-11-22T04:51:00+00:00",
+      "patches": [
+        [5, 0, " ho ho"]
+      ]
+    }
+  ]
+}

@@ -88,19 +88,12 @@ impl Document {
             return;
         }
 
-        if !self.oplog.is_ready(&op) {
-            self.oplog.add_pending(op.clone());
-            return;
-        }
-
         // We are ready to apply this operation, first record it in the oplog and then apply it
         match op.op_type {
             OperationType::Insert => remote_insert(self, &op),
             OperationType::Delete => remote_delete(self, &op)
         }
         
-        self.oplog.record_op(&op);
-
         if self.debug {
             if !self.blocks.check_tree() {
                 self.blocks.print_tree();
@@ -108,16 +101,14 @@ impl Document {
             }
         }
 
-        // Drain anything that became causally ready as a result.
-        let ready = self.oplog.drain_pending();
-        for pending_op in ready {
-            match pending_op.op_type {
-                OperationType::Insert => remote_insert(self, &pending_op),
-                OperationType::Delete => remote_delete(self, &pending_op),
-            }
-            if self.debug && !self.blocks.check_tree() {
-                self.blocks.print_tree();
-                panic!("Tree invalid after applying drained op");
+        self.oplog.record_op(&op);
+
+        // Some operations can now possibly be applied!
+        for (id, _) in &op.ids {
+            let pending_ops = self.oplog.get_pending_for_id(id);
+            for op in pending_ops {
+                // println!("Applying pending op {:?} for id {:?} at site {}", op, id, self.state.replica);
+                self.apply_op(&op);
             }
         }
 
@@ -413,19 +404,31 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
         
         let mut processed = 0;
         while processed < offsets.len() {
+            // FIXME: place of inefficiency
             // Find the block with this base ID + first (smallest) offset
             let path = doc.blocks.find_by_id(id.clone(), offsets[processed]);
             if path.is_empty() {
-                // Assume already 
+                // Assume already deleted
                 processed += 1;
                 continue;
             }
             // Verify if the base id of the blocks are the same else continue 
             if doc.blocks.node_base_id(*path.last().unwrap()) != id {
-                // FIXME: May need to be handled separately
-                eprintln!("Base ID of the block does not match the ID in delete operation, skipping this offset");
-                processed += 1;
+                let partial_op = Operation { 
+                    op_type: OperationType::Delete, 
+                    // ids should have ALL the offsets 
+                    ids: vec![(id.clone(), offsets[processed..].to_vec())],
+                    // ids: vec![(id.clone(), vec![offsets[processed]])], 
+                    payload: None, 
+                    site: op.site, 
+                    clock: op.clock
+                };
+                doc.oplog.add_to_pending(partial_op);
+                processed = offsets.len();
                 continue;
+                // // we have added the entire operation to pending
+                // processed = offsets.len();
+                // continue;
             }
             let block: usize = *path.last().unwrap();
             let base_id = doc.blocks.node_base_id(block);
@@ -461,142 +464,3 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
         }
     }
 }
-
-// #[test]
-// fn ab() {
-//     let mut doc = Document::new(0);
-//     doc.ins(0,"a".to_string());
-//     doc.ins(1,"b".to_string());
-//     assert_eq!(doc.read(), "ab".to_string());
-// }
-
-// #[test]
-// fn abc() {
-//     let mut doc = Document::new(0);
-//     doc.ins(0,"a".to_string());
-//     doc.ins(1,"b".to_string());
-//     doc.ins(2,"c".to_string());
-
-//     assert_eq!(doc.read(), "abc".to_string());
-//     // panic!("just to debug...");
-// }
-
-// #[test]
-// fn simple_test_1() {
-//     let mut d0 = Document::new(0);
-//     let mut d1 = Document::new(1);
-
-//     d1.ins(0, "c".to_string());
-//     d0.ins(0, "b".to_string());
-
-//     d1.ins(0, "b".to_string());
-//     d0.ins(1, "c".to_string());
-
-//     d0.merge_from(&d1);
-//     d1.merge_from(&d0);
-//     assert_eq!(d0.read(), d1.read());
-
-//     d0.ins(1, "b".to_string());
-
-//     d0.merge_from(&d1);
-//     d1.merge_from(&d0);
-//     assert_eq!(d0.read(), d1.read());
-// }
-
-// #[test]
-// fn test_interleaved_inserts() {
-//     let mut a = Document::new(0);
-//     let mut b = Document::new(1);
-
-//     a.ins(0, "A".to_string());
-//     a.ins(1, "B".to_string());
-
-//     a.blocks.print_tree();
-
-//     b.ins(0, "X".to_string());
-//     b.ins(1, "Y".to_string());
-
-//     b.blocks.print_tree();
-
-//     a.merge_from(&b);
-//     a.blocks.print_tree();
-//     b.merge_from(&a);
-
-//     assert_eq!(a.read(), b.read());
-// }
-
-// #[allow(dead_code)]
-// fn run_insert_delete(seed: u64) {
-//     use rand::{SeedableRng, RngExt};
-//     use rand::rngs::StdRng;
-
-//     let mut rng = StdRng::seed_from_u64(seed);
-
-//     let mut docs = vec![
-//         Document::new(0),
-//         Document::new(1),
-//         // Document::new(2),
-//     ];
-
-//     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
-
-//     for _ in 0..200 {
-//         let i = rng.random_range(0..docs.len());
-//         let doc = &mut docs[i];
-//         let len = doc.read().chars().count();
-
-//         // 30% chance to delete if there's something to delete
-//         if len > 0 && rng.random_range(0..10) < 3 {
-//             let from = rng.random_range(0..len);
-//             let to = rng.random_range(from+1..=len);
-//             doc.del(from, to);
-//         } else {
-//             let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
-//             let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
-//             doc.ins(pos, ch);
-//         }
-
-//         // random merge
-//         let a = rng.random_range(0..docs.len());
-//         let b = rng.random_range(0..docs.len());
-//         if a == b { continue; }
-
-//         let (left, right) = if a < b {
-//             let (l, r) = docs.split_at_mut(b);
-//             (&mut l[a], &mut r[0])
-//         } else {
-//             let (l, r) = docs.split_at_mut(a);
-//             (&mut r[0], &mut l[b])
-//         };
-
-//         let clone = right.clone();
-//         left.merge_from(&clone);
-
-//         let clone2 = left.clone();
-//         right.merge_from(&clone2);
-
-//         if left.read() != right.read() {
-//             println!("Divergence detected at seed {}!", seed);
-//             left.blocks.print_tree();   
-//             println!("---");
-//             right.blocks.print_tree();
-//         }
-
-//         assert_eq!(
-//             left.read(),
-//             right.read(),
-//             "Seed {} diverged\n'{}' vs '{}'",
-//             seed,
-//             left.read(),
-//             right.read()
-//         );
-//     }
-// }
-
-// #[test]
-// fn test_insert_delete_heavy() {
-//     for i in 0..1000 {
-//         println!("Running seed {}", i); 
-//         run_insert_delete(i);
-//     }
-// }

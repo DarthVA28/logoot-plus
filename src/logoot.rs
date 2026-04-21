@@ -116,7 +116,7 @@ fn run_insert_delete(seed: u64) {
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let mut sys = LogootSplitSystem::new(2);
+    let mut sys = LogootSplitSystem::new(3);
     let doc_ids = vec![0u32, 1u32];
 
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();

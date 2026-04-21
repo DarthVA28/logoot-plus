@@ -26,55 +26,33 @@ pub struct OpId {
 pub struct OpLog { 
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
-    pub pending: Vec<Operation>
+    // pub pending: Vec<Operation>
+    pub pending: HashMap<Identifier, Vec<Operation>>
 }
 
 impl OpLog { 
     pub fn new() -> Self {
-        OpLog { index: HashSet::new(), v_clock: HashMap::new(), pending: vec![] }
+        OpLog { index: HashSet::new(), v_clock: HashMap::new(), pending: HashMap::new() }
     }
 
     pub fn is_recorded(&self, op: &Operation) -> bool {
         let id = OpId { site: op.site, clock: op.clock };
         self.index.contains(&id)
     }
-
-    pub fn is_ready(&self, op: &Operation) -> bool {
-        let clk = self.v_clock.get(&op.site).unwrap_or(&1);
-        op.clock <= clk + 1
-    }
-
+    
     pub fn record_op(&mut self, op: &Operation) {
         let id = OpId { site: op.site, clock: op.clock };
         self.index.insert(id);
         self.v_clock.insert(op.site, op.clock);
     }
 
-    pub fn add_pending(&mut self, op: Operation) {
-        self.pending.push(op);
-    }   
+    pub fn add_to_pending(&mut self, op: Operation) {
+        let id = op.ids.first().unwrap().0.clone();
+        self.pending.entry(id).or_default().push(op);   
+    }
 
-    pub fn drain_pending(&mut self) -> Vec<Operation> {
-        let mut ready = vec![];
-        loop {
-            let candidates = std::mem::take(&mut self.pending);
-            let mut found = false;
-
-            for op in candidates {
-                if self.index.contains(&OpId { site: op.site, clock: op.clock }) {
-                    continue; // duplicate
-                }
-                if self.is_ready(&op) {
-                    self.record_op(&op);
-                    ready.push(op);
-                    found = true;
-                } else {
-                    self.pending.push(op); // re-queue for next pass
-                }
-            }
-            if !found { break; }
-        }
-        ready
+    pub fn get_pending_for_id(&mut self, id: &Identifier) -> Vec<Operation> {
+        self.pending.remove(id).unwrap_or_default()
     }
 
     pub fn clear(&mut self) {
