@@ -79,9 +79,25 @@ pub fn generate_operations(trace: TraceFile) -> Result<GeneratedTrace, String> {
     generate_operations_with_checks(trace, None)
 }
 
+pub fn generate_operations_for_targets_with_checks(
+    trace: TraceFile,
+    check_every_txns: Option<usize>,
+    interested_targets: &[usize],
+) -> Result<GeneratedTrace, String> {
+    generate_operations_impl(trace, check_every_txns, Some(interested_targets))
+}
+
 pub fn generate_operations_with_checks(
     trace: TraceFile,
     check_every_txns: Option<usize>,
+) -> Result<GeneratedTrace, String> {
+    generate_operations_impl(trace, check_every_txns, None)
+}
+
+fn generate_operations_impl(
+    trace: TraceFile,
+    check_every_txns: Option<usize>,
+    interested_targets: Option<&[usize]>,
 ) -> Result<GeneratedTrace, String> {
     if trace.num_agents == 0 {
         return Err("numAgents must be > 0".to_string());
@@ -91,6 +107,20 @@ pub fn generate_operations_with_checks(
         && n == 0
     {
         return Err("check_every_txns must be > 0 when provided".to_string());
+    }
+
+    let mut target_mask = vec![true; trace.num_agents];
+    if let Some(targets) = interested_targets {
+        target_mask.fill(false);
+        for target in targets {
+            if *target >= trace.num_agents {
+                return Err(format!(
+                    "interested target {} out of bounds for numAgents {}",
+                    target, trace.num_agents
+                ));
+            }
+            target_mask[*target] = true;
+        }
     }
 
     let mut system = LogootSplitSystem::new(trace.num_agents);
@@ -134,6 +164,7 @@ pub fn generate_operations_with_checks(
                 txn_idx,
                 sender,
                 patch,
+                &target_mask,
                 &mut local_ops,
                 &mut remote_ops,
                 &mut all_ops,
@@ -391,6 +422,7 @@ fn apply_patch_to_sender(
     txn_idx: usize,
     sender: usize,
     patch: &Patch,
+    target_mask: &[bool],
     local_ops: &mut [Vec<Operation>],
     remote_ops: &mut [Vec<Operation>],
     all_ops: &mut Vec<Operation>,
@@ -398,20 +430,46 @@ fn apply_patch_to_sender(
     let sender_u32 = sender as u32;
     let sender_idx = system.network.index_of(sender_u32);
 
-    let pos = patch.0;
-    let del_len = patch.1;
+    let pos_utf16 = patch.0;
+    let del_len_utf16 = patch.1;
     let ins = &patch.2;
+    let mut pos = pos_utf16;
+    let mut del_len = del_len_utf16;
+
+    // Fast path: most traces already use Rust-char-compatible coordinates.
+    // Fallback to UTF-16 conversion only when bounds are invalid.
+    let doc_size_before = {
+        let doc = &system.network.documents[sender_idx];
+        doc.blocks.tree_size()
+    };
+    let mut to = pos.saturating_add(del_len);
+    let mut converted_from_utf16 = false;
+    if pos > doc_size_before || to > doc_size_before {
+        let (from, conv_to) = {
+            let doc = &mut system.network.documents[sender_idx];
+            let content = doc.read();
+            let from = utf16_to_char_index(&content, pos_utf16);
+            let conv_to = utf16_to_char_index(&content, pos_utf16.saturating_add(del_len_utf16));
+            (from, conv_to)
+        };
+        pos = from;
+        del_len = conv_to.saturating_sub(from);
+        to = pos.saturating_add(del_len);
+        converted_from_utf16 = true;
+    }
 
     if del_len > 0 {
-        let doc_size = {
-            let doc = &system.network.documents[sender_idx];
-            doc.blocks.tree_size()
-        };
-        let to = pos.saturating_add(del_len);
-        if pos > doc_size || to > doc_size {
+        if pos > doc_size_before || to > doc_size_before {
             return Err(format!(
-                "invalid delete range in txn {} (agent={}): {}..{} while doc size is {}",
-                txn_idx, sender, pos, to, doc_size
+                "invalid delete range in txn {} (agent={}): {}..{} while doc size is {} (raw utf16 {}..{}, utf16_conversion_attempted={})",
+                txn_idx,
+                sender,
+                pos,
+                to,
+                doc_size_before,
+                pos_utf16,
+                pos_utf16.saturating_add(del_len_utf16),
+                converted_from_utf16
             ));
         }
         let op = {
@@ -419,7 +477,7 @@ fn apply_patch_to_sender(
             doc.del(pos, to)
         };
         system.network.broadcast(op.clone(), sender_u32);
-        record_op(op, sender, local_ops, remote_ops, all_ops);
+        record_op(op, sender, target_mask, local_ops, remote_ops, all_ops);
     }
 
     if !ins.is_empty() {
@@ -429,23 +487,42 @@ fn apply_patch_to_sender(
         };
         if let Some(op) = maybe_op {
             system.network.broadcast(op.clone(), sender_u32);
-            record_op(op, sender, local_ops, remote_ops, all_ops);
+            record_op(op, sender, target_mask, local_ops, remote_ops, all_ops);
         }
     }
 
     Ok(())
 }
 
+fn utf16_to_char_index(text: &str, utf16_index: usize) -> usize {
+    let mut utf16_count = 0usize;
+    let mut char_count = 0usize;
+
+    for ch in text.chars() {
+        let next = utf16_count + ch.len_utf16();
+        if next > utf16_index {
+            break;
+        }
+        utf16_count = next;
+        char_count += 1;
+    }
+
+    char_count
+}
+
 fn record_op(
     op: Operation,
     sender: usize,
+    target_mask: &[bool],
     local_ops: &mut [Vec<Operation>],
     remote_ops: &mut [Vec<Operation>],
     all_ops: &mut Vec<Operation>,
 ) {
-    local_ops[sender].push(op.clone());
+    if target_mask[sender] {
+        local_ops[sender].push(op.clone());
+    }
     for (target, ops) in remote_ops.iter_mut().enumerate() {
-        if target != sender {
+        if target != sender && target_mask[target] {
             ops.push(op.clone());
         }
     }
@@ -580,7 +657,7 @@ fn read_rss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Patch, TraceFile, TraceTxn, schedule_txns};
+    use super::{Patch, TraceFile, TraceTxn, schedule_txns, utf16_to_char_index};
 
     #[test]
     fn schedules_txns_by_parents() {
@@ -608,5 +685,15 @@ mod tests {
 
         let order = schedule_txns(&trace).expect("scheduler should succeed");
         assert_eq!(order, vec![1, 0]);
+    }
+
+    #[test]
+    fn utf16_index_conversion_handles_surrogates() {
+        let s = "a😀b";
+        assert_eq!(utf16_to_char_index(s, 0), 0);
+        assert_eq!(utf16_to_char_index(s, 1), 1);
+        assert_eq!(utf16_to_char_index(s, 2), 1);
+        assert_eq!(utf16_to_char_index(s, 3), 2);
+        assert_eq!(utf16_to_char_index(s, 4), 3);
     }
 }

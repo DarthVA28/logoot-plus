@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use logoot_plus::trace_bench::{
-    ContentCheck, RssStats, TimingStats, TraceStats, generate_operations_with_checks, load_trace_file,
-    measure_merge_rss, merge_remote_cpu_timed_once, reload_from_disk_cpu_once, write_oplog,
+    ContentCheck, RssStats, TimingStats, TraceStats, generate_operations_for_targets_with_checks,
+    load_trace_file, measure_merge_rss, merge_remote_cpu_timed_once, reload_from_disk_cpu_once,
+    write_oplog,
 };
 
 #[cfg(feature = "mem-heap")]
@@ -95,9 +96,17 @@ fn main() {
         trace.txns.len()
     );
 
+    let targets = match collect_targets(&config.target, trace.num_agents) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+
     eprintln!("[setup] generating operation streams and parent-aware schedule");
     let stage_started = Instant::now();
-    let generated = match generate_operations_with_checks(trace, config.check_every) {
+    let generated = match generate_operations_for_targets_with_checks(trace, config.check_every, &targets) {
         Ok(g) => g,
         Err(err) => {
             eprintln!("failed generating operations: {err}");
@@ -122,13 +131,6 @@ fn main() {
         }
     }
 
-    let targets = match collect_targets(&config.target, generated.trace.num_agents) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-    };
     let mut target_results = Vec::with_capacity(targets.len());
     eprintln!(
         "[run] mode={} targets={} iterations={} (per target)",
@@ -222,11 +224,15 @@ fn main() {
         if let Some(check) = &result.content_check
             && !check.matches
         {
+            let expected_chars = check.expected_end_content.chars().count();
+            let observed_chars = check.observed_content.chars().count();
+            let first_diff = first_diff_char_index(&check.expected_end_content, &check.observed_content);
             eprintln!(
-                "content mismatch for target {}: expected {:?} observed {:?}",
+                "content mismatch for target {}: expected_chars={} observed_chars={} first_diff_char={:?}",
                 target,
-                check.expected_end_content,
-                check.observed_content
+                expected_chars,
+                observed_chars,
+                first_diff
             );
             std::process::exit(1);
         }
@@ -389,6 +395,25 @@ fn collect_targets(target: &Target, num_agents: usize) -> Result<Vec<usize>, Str
             } else {
                 Ok(vec![*idx])
             }
+        }
+    }
+}
+
+fn first_diff_char_index(a: &str, b: &str) -> Option<usize> {
+    let mut ai = a.chars();
+    let mut bi = b.chars();
+    let mut idx = 0usize;
+
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(ac), Some(bc)) => {
+                if ac != bc {
+                    return Some(idx);
+                }
+                idx += 1;
+            }
+            (Some(_), None) | (None, Some(_)) => return Some(idx),
+            (None, None) => return None,
         }
     }
 }

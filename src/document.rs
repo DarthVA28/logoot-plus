@@ -295,9 +295,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // Split the block at the position and insert a new block in between
     let sp = (pos - block_start) as u32;
     if (sp > block_ranges.1 - block_ranges.0) || (sp == 0) {
-        // println!("invalid split point during insertion - block id is {:?}, block ranges are {:?}, split point is {}", doc.blocks.node_base_id(*block), doc.blocks.node_ranges(*block), sp);
-        // println!("Pos was: {}, block start was {}, block end was {}", pos, block_start, block_end);
-        // println!("Length of document content is {}", doc.read().chars().count());
         doc.blocks.print_tree();
         panic!("Invalid split point - split point: {}, block size: {}", sp, block_ranges.1 - block_ranges.0);
     }
