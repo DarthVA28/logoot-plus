@@ -408,7 +408,6 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             // Find the block with this base ID + first (smallest) offset
             let path = doc.blocks.find_by_id(id.clone(), offsets[processed]);
             if path.is_empty() {
-                // Assume already deleted
                 processed += 1;
                 continue;
             }

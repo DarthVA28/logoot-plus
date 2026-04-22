@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use logoot_plus::trace_bench::{
-    ContentCheck, RssStats, TimingStats, TraceStats, generate_operations, load_trace_file,
+    ContentCheck, RssStats, TimingStats, TraceStats, generate_operations_with_checks, load_trace_file,
     measure_merge_rss, merge_remote_cpu_timed_once, reload_from_disk_cpu_once, write_oplog,
 };
 
@@ -26,6 +26,7 @@ struct Config {
     input: PathBuf,
     mode: Mode,
     iterations: usize,
+    check_every: Option<usize>,
     target: Target,
     output: PathBuf,
     oplog: PathBuf,
@@ -42,6 +43,7 @@ struct OutputFile {
     trace_path: String,
     mode: String,
     iterations: usize,
+    check_every: Option<usize>,
     trace_stats: TraceStats,
     targets: Vec<TargetResult>,
 }
@@ -95,7 +97,7 @@ fn main() {
 
     eprintln!("[setup] generating operation streams and parent-aware schedule");
     let stage_started = Instant::now();
-    let generated = match generate_operations(trace) {
+    let generated = match generate_operations_with_checks(trace, config.check_every) {
         Ok(g) => g,
         Err(err) => {
             eprintln!("failed generating operations: {err}");
@@ -236,6 +238,7 @@ fn main() {
         trace_path: config.input.display().to_string(),
         mode: mode_name(config.mode).to_string(),
         iterations: config.iterations,
+        check_every: config.check_every,
         trace_stats: generated.stats,
         targets: target_results,
     };
@@ -268,6 +271,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut input = None::<PathBuf>;
     let mut mode = Mode::All;
     let mut iterations = 20usize;
+    let mut check_every = None::<usize>;
     let mut target = Target::All;
     let mut output = PathBuf::from("results/trace_bench.json");
     let mut oplog = PathBuf::from("results/trace_ops.json");
@@ -291,6 +295,17 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                 iterations = val
                     .parse::<usize>()
                     .map_err(|e| format!("invalid --iterations value {val}: {e}"))?;
+            }
+            "--check-every" => {
+                i += 1;
+                let val = args.get(i).ok_or("--check-every requires an integer")?;
+                let parsed = val
+                    .parse::<usize>()
+                    .map_err(|e| format!("invalid --check-every value {val}: {e}"))?;
+                if parsed == 0 {
+                    return Err("--check-every must be > 0".to_string());
+                }
+                check_every = Some(parsed);
             }
             "--target" => {
                 i += 1;
@@ -330,6 +345,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         input,
         mode,
         iterations,
+        check_every,
         target,
         output,
         oplog,
@@ -383,6 +399,7 @@ fn print_usage() {
   --input <trace.json> \
   [--mode merge-time|reload-time|mem-rss|mem-heap|all] \
   [--iterations N] \
+    [--check-every N] \
   [--target all|INDEX] \
   [--oplog results/trace_ops.json] \
   [--output results/trace_bench.json]"

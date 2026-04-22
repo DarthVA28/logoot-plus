@@ -76,8 +76,21 @@ pub fn load_trace_file(path: &Path) -> Result<TraceFile, String> {
 }
 
 pub fn generate_operations(trace: TraceFile) -> Result<GeneratedTrace, String> {
+    generate_operations_with_checks(trace, None)
+}
+
+pub fn generate_operations_with_checks(
+    trace: TraceFile,
+    check_every_txns: Option<usize>,
+) -> Result<GeneratedTrace, String> {
     if trace.num_agents == 0 {
         return Err("numAgents must be > 0".to_string());
+    }
+
+    if let Some(n) = check_every_txns
+        && n == 0
+    {
+        return Err("check_every_txns must be > 0 when provided".to_string());
     }
 
     let mut system = LogootSplitSystem::new(trace.num_agents);
@@ -88,6 +101,7 @@ pub fn generate_operations(trace: TraceFile) -> Result<GeneratedTrace, String> {
 
     let mut patch_count = 0usize;
     let order = schedule_txns(&trace)?;
+    let mut processed_txns = 0usize;
 
     for txn_idx in order {
         let txn = &trace.txns[txn_idx];
@@ -125,6 +139,13 @@ pub fn generate_operations(trace: TraceFile) -> Result<GeneratedTrace, String> {
                 &mut all_ops,
             )?;
         }
+
+        processed_txns += 1;
+        if let Some(n) = check_every_txns
+            && processed_txns % n == 0
+        {
+            run_periodic_sync_all_check(&system, processed_txns, txn_idx)?;
+        }
     }
 
     let stats = TraceStats {
@@ -140,6 +161,33 @@ pub fn generate_operations(trace: TraceFile) -> Result<GeneratedTrace, String> {
         all_ops,
         stats,
     })
+}
+
+fn run_periodic_sync_all_check(
+    system: &LogootSplitSystem,
+    processed_txns: usize,
+    last_txn_idx: usize,
+) -> Result<(), String> {
+    let mut probe_network = system.network.clone();
+    probe_network.sync_all();
+
+    let mut expected = None::<String>;
+    let mut expected_site = None::<u32>;
+
+    for doc in &mut probe_network.documents {
+        let site = doc.site_id();
+        let content = doc.read();
+
+        if let Some(ref exp) = expected {
+            // use assert equal to get a diff on mismatch, but provide a custom error message with more context
+            assert_eq!(&content, exp, "periodic sync_all check failed after {} txns (last scheduled txn {}): replica {} diverged from replica {}", processed_txns, last_txn_idx, site, expected_site.unwrap_or(site));
+        } else {
+            expected_site = Some(site);
+            expected = Some(content);
+        }
+    }
+
+    Ok(())
 }
 
 pub fn merge_remote_cpu_once(generated: &GeneratedTrace, target: usize) -> Result<ContentCheck, String> {

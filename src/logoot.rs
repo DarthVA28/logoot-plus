@@ -116,7 +116,7 @@ fn run_insert_delete(seed: u64) {
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let mut sys = LogootSplitSystem::new(3);
+    let mut sys = LogootSplitSystem::new(2);
     let doc_ids = vec![0u32, 1u32];
 
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
@@ -155,6 +155,8 @@ fn run_insert_delete(seed: u64) {
 
         if r0 != r1 {
             println!("Divergence detected at seed {}!", seed);
+            // sys.network.documents[sys.network.index_of(a)].blocks.print_tree();
+            // sys.network.documents[sys.network.index_of(b)].blocks.print_tree();
         }
 
         assert_eq!(
@@ -173,5 +175,80 @@ fn test_insert_delete_heavy() {
     for i in 0..1000 {
         println!("Running seed {}", i);
         run_insert_delete(i);
+    }
+    // run_insert_delete(4);
+}
+
+fn run_async_ops(seed: u64) {
+    use rand::{SeedableRng, RngExt};
+    use rand::rngs::StdRng;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let n_agents = 100;
+    let mut sys = LogootSplitSystem::new(n_agents);
+    let doc_ids: Vec<u32> = (0..n_agents).map(|i| i as u32).collect();
+
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+
+    for _ in 0..1000 {
+        let i = rng.random_range(0..doc_ids.len());
+        let doc_id = doc_ids[i];
+
+        let content = sys.read(doc_id);
+        let len = content.chars().count();
+
+        // 30% delete
+        if len > 0 && rng.random_range(0..10) < 3 {
+            let from = rng.random_range(0..len);
+            let to = rng.random_range(from + 1..=len);
+            println!("Deleting from {} to {} in doc {}", from, to, doc_id);
+            sys.del(doc_id, from, to);
+        } else {
+            let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
+            let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
+            println!("Inserting '{}' at {} in doc {}", ch, pos, doc_id);
+            sys.ins(doc_id, pos, ch);
+        }
+
+        // do periodic sync_all merges (generate rng between 1-10, if 5 do a full sync)
+        if rng.random_range(1..=100) == 50 {
+            println!("Performing full sync at seed {}", seed);
+            sys.network.sync_all();
+
+            // Check for convergence
+            for &a in &doc_ids {
+                for &b in &doc_ids {
+                    if a != b {
+                        let r0 = sys.read(a);
+                        let r1 = sys.read(b);
+
+                        if r0 != r1 {
+                            println!("Divergence detected between doc {} and {} at seed {}!", a, b, seed);
+                        }
+
+                        assert_eq!(
+                            r0,
+                            r1,
+                            "Seed {} diverged between doc {} and {}\n'{}' vs '{}'",
+                            seed,
+                            a,
+                            b,
+                            r0,
+                            r1
+                        );
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+#[test]
+fn test_async_ops() {
+    for i in 0..10 {
+        println!("Running async ops seed {}", i);
+        run_async_ops(i);
     }
 }
