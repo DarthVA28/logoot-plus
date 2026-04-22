@@ -179,6 +179,7 @@ fn test_insert_delete_heavy() {
     // run_insert_delete(4);
 }
 
+#[allow(dead_code)]
 fn run_async_ops(seed: u64) {
     use rand::{SeedableRng, RngExt};
     use rand::rngs::StdRng;
