@@ -43,6 +43,7 @@ impl Document {
             // For empty inserts   
             return None;
         }
+        // println!("Inserting '{}' at pos {} at site {}", text, pos, self.state.replica);
         let op = local_insert(self, pos, text);
         if self.debug {
             if !self.blocks.check_tree() {
@@ -57,6 +58,7 @@ impl Document {
     }
 
     pub fn del(&mut self, from: usize, to: usize) -> Operation {
+        // println!("Deleting from {} to {} at site {}", from, to, self.state.replica);
         let op = local_delete(self, from, to);
         if self.debug {
             if !self.blocks.check_tree() {
@@ -84,14 +86,21 @@ impl Document {
     }
 
     pub fn apply_op(&mut self, op: &Operation) {
-        if self.oplog.is_recorded(&op) {
-            return;
-        }
+        // FIXME : For idempotence this should be there. But can abstract at a higher level  
+        // if self.oplog.is_recorded(&op) {
+        //     return;
+        // }
 
         // We are ready to apply this operation, first record it in the oplog and then apply it
         match op.op_type {
-            OperationType::Insert => remote_insert(self, &op),
-            OperationType::Delete => remote_delete(self, &op)
+            OperationType::Insert => {
+                // println!("Applying remote insert of '{}' at site {} at site {}", op.payload.as_ref().unwrap(), op.site, self.state.replica);
+                remote_insert(self, &op)
+            },
+            OperationType::Delete => {
+                // println!("Applying remote delete of ids {:?} at site {} at site {}", op.ids, op.site, self.state.replica);
+                remote_delete(self, &op)
+            }
         }
         
         if self.debug {
@@ -101,14 +110,16 @@ impl Document {
             }
         }
 
-        self.oplog.record_op(&op);
+        // self.oplog.record_op(&op);
 
         // Some operations can now possibly be applied!
-        for (id, _) in &op.ids {
-            let pending_ops = self.oplog.get_pending_for_id(id);
-            for op in pending_ops {
-                // println!("Applying pending op {:?} for id {:?} at site {}", op, id, self.state.replica);
-                self.apply_op(&op);
+        if op.op_type == OperationType::Insert {
+            for (id, _) in &op.ids {
+                let pending_ops = self.oplog.get_pending_for_id(id);
+                for op in pending_ops {
+                    // println!("Applying pending op {:?} for id {:?} at site {}", op, id, self.state.replica);
+                    self.apply_op(&op);
+                }
             }
         }
 
@@ -405,36 +416,33 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
         let mut processed = 0;
         while processed < offsets.len() {
             // FIXME: place of inefficiency
-            // Find the block with this base ID + first (smallest) offset
-            let path = doc.blocks.find_by_id(id.clone(), offsets[processed]);
+            let path = doc.blocks.find_by_id_exact(id.clone(), offsets[processed]);
             if path.is_empty() {
-                processed += 1;
-                continue;
-            }
-            // Verify if the base id of the blocks are the same else continue 
-            if doc.blocks.node_base_id(*path.last().unwrap()) != id {
+                // Buffer this delete in pending, apply it later 
+                // println!("Block n'exist pas - buffering delete for id {:?} and offset {} at site {}", id, offsets[processed], doc.state.replica);
                 let partial_op = Operation { 
                     op_type: OperationType::Delete, 
                     // ids should have ALL the offsets 
-                    ids: vec![(id.clone(), offsets[processed..].to_vec())],
+                    ids: vec![(id.clone(), vec![offsets[processed]])],
                     // ids: vec![(id.clone(), vec![offsets[processed]])], 
                     payload: None, 
                     site: op.site, 
                     clock: op.clock
                 };
                 doc.oplog.add_to_pending(partial_op);
-                processed = offsets.len();
+                processed += 1;
                 continue;
-                // // we have added the entire operation to pending
-                // processed = offsets.len();
-                // continue;
+            }
+            // Verify if the base id of the blocks are the same else continue 
+            if doc.blocks.node_base_id(*path.last().unwrap()) != id {
+                // Throw an error 
+                panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, offsets[processed], doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
             }
             let block: usize = *path.last().unwrap();
             let base_id = doc.blocks.node_base_id(block);
             let block_ranges = doc.blocks.node_ranges(block);
             let block_size = block_ranges.1 - block_ranges.0;
             let offset = offsets[processed];
-            // let n_delete = offsets.len();
 
             // Count how many of the remaining offsets fall inside this node.
             // Offsets are always a contiguous range, and this node covers

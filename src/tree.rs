@@ -514,6 +514,7 @@ impl Tree {
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
+                    // println!("Covered...");
                     // Split the incoming node 
                     let sp = Self::find_split_point(b1, &b2.base);
                     let left_content: String = content.chars().take(sp as usize).collect();
@@ -659,8 +660,58 @@ impl Tree {
         }
         return vec![];
     }
-}
 
+    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Vec<usize> {
+        let mut path = vec![];
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let node_idi = IdentifierInterval::new(base.clone(), offset, offset + 1);
+        let mut curr = self.root.unwrap();
+
+        loop {
+            path.push(curr);
+            let b1 = &node_idi;
+            let b2 = &self.node_get_identifier_interval(curr);
+
+            match compare_intervals(b1, &b2) {
+                IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
+                    if let Some(r) = self.nodes[curr].right {
+                        curr = r;
+                    } else {
+                        return vec![];
+                    }
+                }
+                IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
+                    if let Some(l) = self.nodes[curr].left {
+                        curr = l;
+                    } else {
+                        return vec![];
+                    }
+                }
+                IdOrderingRelation::B1EqualsB2 => {
+                    // Exact interval match — still verify base
+                    if self.nodes[curr].base_id == base {
+                        return path;
+                    }
+                    return vec![];
+                }
+                IdOrderingRelation::B1InsideB2 => {
+                    // Probe falls inside this node's range.
+                    // Only a real match if the base is identical.
+                    // Cannot exist elsewhere in the tree, so return empty if base differs.
+                    if self.nodes[curr].base_id == base {
+                        return path;
+                    }
+                    return vec![];
+                }
+                _ => panic!("Unexpected relation in find_by_id_exact"),
+            }
+        }
+    }
+
+
+}
 
 pub struct InOrderIter<'a> {
     tree: &'a Tree,
@@ -980,4 +1031,3 @@ Test cases for AVL TREE
 //     }
 
 // }
-

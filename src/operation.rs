@@ -47,6 +47,7 @@ impl OpLog {
     }
 
     pub fn add_to_pending(&mut self, op: Operation) {
+        // println!("Adding op {:?} to pending at site {}", op, op.site);
         let id = op.ids.first().unwrap().0.clone();
         self.pending.entry(id).or_default().push(op);   
     }
