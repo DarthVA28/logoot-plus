@@ -1,5 +1,6 @@
 use core::panic;
-use std::collections::HashMap;
+// use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 use crate::node::Node;
 use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, num_insertable};
 
