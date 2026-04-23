@@ -1,45 +1,47 @@
 use wasm_bindgen::prelude::*;
-// Assuming your core CRDT logic is in a module named `crdt` or similar.
-use crate::Document;
+use crate::{Document, LogootSplitSystem};
+use crate::network::Network;
 
-#[wasm_bindgen(js_name = Document)]
-pub struct WasmDocument {
-    inner: Document, 
+#[wasm_bindgen(js_name = LogootSplitSystem)]
+pub struct WasmLogootSplitSystem {
+    inner: LogootSplitSystem,
 }
 
-#[wasm_bindgen(js_class = Document)]
-impl WasmDocument {
+#[wasm_bindgen(js_class = LogootSplitSystem)]
+impl WasmLogootSplitSystem {
     #[wasm_bindgen(constructor)]
-    pub fn new(id: u32) -> WasmDocument {
-        WasmDocument {
-            inner: Document::new(id),
+    pub fn new(n: usize) -> WasmLogootSplitSystem {
+        let docs = (0..n as u32).map(Document::new).collect();
+        WasmLogootSplitSystem {
+            inner: LogootSplitSystem { network: Network::new(docs) }
         }
     }
 
-    pub fn ins(&mut self, pos: usize, text: String) {
-        self.inner.ins(pos, text);
+    pub fn ins(&mut self, doc_id: u32, pos: usize, text: String) {
+        self.inner.ins(doc_id, pos, text);
     }
 
-    pub fn del(&mut self, from: usize, to: usize) {
-        self.inner.del(from, to);
+    pub fn del(&mut self, doc_id: u32, from: usize, to: usize) {
+        self.inner.del(doc_id, from, to);
     }
 
-    pub fn read(&mut self) -> String {
-        self.inner.read()
+    pub fn read(&mut self, doc_id: u32) -> String {
+        self.inner.read(doc_id)
     }
 
-    #[wasm_bindgen(js_name = mergeFrom)]
-    pub fn merge_from(&mut self, other: &WasmDocument) {
-        self.inner.merge_from(&other.inner);
+    #[wasm_bindgen(js_name = syncFrom)]
+    pub fn sync_from(&mut self, into: u32, from: u32) {
+        self.inner.merge_from(into, from);
     }
 
+    #[wasm_bindgen(js_name = getDebugBlocks)]
+    pub fn get_debug_blocks(&self, doc_id: u32) -> String {
+        let idx = self.inner.network.index_of(doc_id);
+        format!("{:?}", self.inner.network.documents[idx].blocks)
+    }
+    
+    #[wasm_bindgen(js_name = reset)]
     pub fn reset(&mut self) {
         self.inner.reset();
-    }
-
-    // Exposing internal block state for your console.log debugging
-    #[wasm_bindgen(js_name = getDebugBlocks)]
-    pub fn get_debug_blocks(&self) -> String {
-        format!("{:?}", self.inner.blocks) // Assuming BlockTree derives Debug
     }
 }

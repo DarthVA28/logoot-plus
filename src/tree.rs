@@ -377,12 +377,12 @@ impl Tree {
         }
     }
 
-    fn find_split_point(node_idi: &IdentifierInterval, id_insert: &Id) -> u32 {
+    fn find_split_point(idi_short: &IdentifierInterval, id_long: &Id) -> u32 {
         let mut sp = 0;
-        let text_len = node_idi.hi - node_idi.lo;
+        let text_len = idi_short.hi - idi_short.lo;
         for i in 0..text_len {
-            let id_elem = node_idi.base.with_offset(node_idi.lo + i);
-            if id_elem >= *id_insert {
+            let id_elem = idi_short.base.with_offset(idi_short.lo + i);
+            if id_elem >= *id_long {
                 break;
             }
             sp+=1;
@@ -390,16 +390,17 @@ impl Tree {
         return sp;
     }
 
-    pub fn insert_rec(&mut self, node: usize, node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
+    pub fn insert_rec(&mut self, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
         let mut path = vec![];
         let mut con = true;
+        let mut rec = false;
 
         while con {
             path.push(from);
             
             // B1 is the block we are adding 
             // B2 is the block we are comparing with
-            let b1 = &node_idi;
+            let b1 = &mut node_idi;
             let b2 = &self.node_get_identifier_interval(from);
 
             match compare_intervals(b1, &b2) {
@@ -513,7 +514,20 @@ impl Tree {
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
-                    panic!("Unexpected case: B2 {:?} is inside B1 {:?} during insert_rec, this should never be generated", b2, b1);
+                    // println!("Covered...");
+                    // Split the incoming node 
+                    let sp = Self::find_split_point(b1, &b2.base);
+                    let left_content: String = content.chars().take(sp as usize).collect();
+                    let right_content: String = content.chars().skip(sp as usize).collect();
+
+                    // Insert both recursively 
+                    self.insert_by_id(site, b1.base.clone(), b1.lo, left_content);
+                    self.insert_by_id(site, std::mem::take(&mut b1.base), b1.lo + sp, right_content);
+
+                    self.free(node);
+
+                    con = false;
+                    rec = true;
                 },
                 IdOrderingRelation::B1ConcatB2 => {
                     let from_node = &mut self.nodes[from];
@@ -526,8 +540,10 @@ impl Tree {
                 },
             }
         }
-        self.rebalance(path);
-    }
+        if !rec {
+            self.rebalance(path);
+        }
+    }    
 
     pub fn splice(&mut self, path: &[usize], target: usize, replacement: Option<usize>) {
         if path.len() == 1 {
@@ -644,8 +660,58 @@ impl Tree {
         }
         return vec![];
     }
-}
 
+    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Vec<usize> {
+        let mut path = vec![];
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let node_idi = IdentifierInterval::new(base.clone(), offset, offset + 1);
+        let mut curr = self.root.unwrap();
+
+        loop {
+            path.push(curr);
+            let b1 = &node_idi;
+            let b2 = &self.node_get_identifier_interval(curr);
+
+            match compare_intervals(b1, &b2) {
+                IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
+                    if let Some(r) = self.nodes[curr].right {
+                        curr = r;
+                    } else {
+                        return vec![];
+                    }
+                }
+                IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
+                    if let Some(l) = self.nodes[curr].left {
+                        curr = l;
+                    } else {
+                        return vec![];
+                    }
+                }
+                IdOrderingRelation::B1EqualsB2 => {
+                    // Exact interval match — still verify base
+                    if self.nodes[curr].base_id == base {
+                        return path;
+                    }
+                    return vec![];
+                }
+                IdOrderingRelation::B1InsideB2 => {
+                    // Probe falls inside this node's range.
+                    // Only a real match if the base is identical.
+                    // Cannot exist elsewhere in the tree, so return empty if base differs.
+                    if self.nodes[curr].base_id == base {
+                        return path;
+                    }
+                    return vec![];
+                }
+                _ => panic!("Unexpected relation in find_by_id_exact"),
+            }
+        }
+    }
+
+
+}
 
 pub struct InOrderIter<'a> {
     tree: &'a Tree,
@@ -965,4 +1031,3 @@ Test cases for AVL TREE
 //     }
 
 // }
-

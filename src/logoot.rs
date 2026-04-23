@@ -4,538 +4,109 @@ pub mod node;
 pub mod operation;
 pub mod state;
 pub mod wasm;
+pub mod document;
+pub mod network;
+pub mod trace_bench;
 
-use std::collections::HashMap;
+use document::Document;
+use network::Network;
 
-use crate::tree::{DelLocation, Tree};
-use crate::identifier::{Id, Identifier, MAX_VALUE, Range, generate_base, num_insertable};
-use crate::state::State;
-use crate::operation::{OpLog, Operation, OperationType};
-// use rand::{RngExt, SeedableRng};
-
-#[derive(Clone, Debug)]
-pub struct Document { 
-    blocks: Tree,
-    state: State,
-    used_ranges_for_id: HashMap<Identifier, Range>,
-    snapshot: String,
-    oplog: OpLog,
-    debug: bool,
-    fresh: bool,
+struct LogootSplitSystem { 
+    pub network: Network
 }
 
-impl Document {
-    pub fn new(id: u32) -> Self {
-        Document {
-            blocks: Tree::new(),
-            state: State::new(id),
-            used_ranges_for_id: HashMap::new(),
-            snapshot: String::new(),
-            oplog: OpLog::new(),
-            debug: false,
-            fresh: true,
+impl LogootSplitSystem {
+    pub fn new(n: usize) -> Self {
+        let docs = (0..n as u32).map(Document::new).collect();
+        LogootSplitSystem { network: Network::new(docs) }
+    }
+
+    pub fn ins(&mut self, doc_id: u32, pos: usize, text: String) {
+        let idx = self.network.index_of(doc_id);
+        let op = self.network.documents[idx].ins(pos, text);
+        if let Some(op) = op {
+            self.network.broadcast(op, doc_id);
         }
     }
 
-    pub fn set_replica(&mut self, replica_id: u32) {
-        self.state.replica = replica_id;
+    pub fn del(&mut self, doc_id: u32, from: usize, to: usize) {
+        let idx = self.network.index_of(doc_id);
+        let op = self.network.documents[idx].del(from, to);
+        self.network.broadcast(op, doc_id);
     }
 
-    pub fn ins(&mut self, pos: usize, text: String) {
-        if text == "" {
-            // For empty inserts   
-            return;
-        }
-        let op = local_insert(self, pos, text);
-        if self.debug {
-            if !self.blocks.check_tree() {
-                self.blocks.print_tree();
-                panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
-            }
-        }
-        self.oplog.record_op(op);
-        self.state.local_clock += 1;
-        self.fresh = false;
+    pub fn read(&mut self, doc_id: u32) -> String {
+        let idx = self.network.index_of(doc_id);
+        self.network.documents[idx].read()
+    }   
+
+    pub fn merge_from(&mut self, into: u32, from: u32) {
+        self.network.sync_from(into, from);
     }
 
-    pub fn del(&mut self, from: usize, to: usize) {
-        let op = local_delete(self, from, to);
-        if self.debug {
-            if !self.blocks.check_tree() {
-                self.blocks.print_tree();
-                panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
-            }
-        }
-        self.oplog.record_op(op);
-        self.state.local_clock += 1;
-        self.fresh = false;
-    }
-
-    pub fn read(&mut self) -> String {
-        if self.fresh {
-            return self.snapshot.clone();
-        }
-        let mut res = String::new();
-        for block in self.blocks.inorder_iter() {
-            res.push_str(&block.content);
-        }
-        self.snapshot = res.clone();
-        self.fresh = true;
-        res
-    }
-
-    pub fn merge_from(&mut self, other: &Document) {
-        for op in &other.oplog.ops {
-            if self.oplog.is_recorded(op) {
-                continue;
-            }
-
-            if !self.oplog.is_ready(&op) {
-                self.oplog.add_pending(op.clone());
-                continue;
-            }
-
-            // We are ready to apply this operation, first record it in the oplog and then apply it
-            match op.op_type {
-                OperationType::Insert => remote_insert(self, &op),
-                OperationType::Delete => remote_delete(self, &op)
-            }
-            
-            self.oplog.record_op(op.clone());
-
-            if self.debug {
-                if !self.blocks.check_tree() {
-                    self.blocks.print_tree();
-                    panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
-                }
-            }
-        }
-        self.fresh = false;
-    }
-
-    
-    pub fn enable_debug(&mut self) {
-        self.debug = true;
-    }
-
-    pub fn disable_debug(&mut self) {
-        self.debug = false;
-    }
-
-    /* Public API for benchmarking */
-    pub fn reset (&mut self) {
-        self.blocks.clear();
-        self.used_ranges_for_id.clear();
-        self.snapshot.clear();
-        self.oplog.clear();
-    }
-
-    pub fn export_ops(&self) -> Vec<Operation> {
-        self.oplog.export()
-    }
-
-    pub fn apply_remote_ops(&mut self, ops: &[Operation]) {
-        for op in ops {
-            if self.oplog.is_recorded(op) {
-                continue;
-            }
-
-            if !self.oplog.is_ready(&op) {
-                self.oplog.add_pending(op.clone());
-                continue;
-            }
-
-            // We are ready to apply this operation, first record it in the oplog and then apply it
-            match op.op_type {
-                OperationType::Insert => remote_insert(self, &op),
-                OperationType::Delete => remote_delete(self, &op)
-            }
-            
-            self.oplog.record_op(op.clone());
-        }
-    }
-
-    pub fn import_ops(replica_id: u32, ops: &[Operation]) -> Self {
-        let mut doc = Document::new(replica_id);
-        doc.apply_remote_ops(ops);
-        doc
-    }
-}
-
-fn extend_block(doc: &mut Document, text:String, block: usize, path: &Vec<usize>, site: u32) -> Operation {
-    // Check if we can extend the block without clashing with the next block 
-    let next = doc.blocks.next(block, path);
-    let insert_base = doc.blocks.node_base_id(block);
-    let insert_offsets = doc.blocks.node_ranges(block);
-
-    if !next.is_none() {
-        let text_len = text.chars().count() as u32;
-        let nxt_block = next.unwrap();
-        // Get bases and offsets for the block and the next block
-        let next_base = doc.blocks.node_base_id(nxt_block);
-        let next_offsets: (u32, u32) = doc.blocks.node_ranges(nxt_block);
-        // Get final IDs
-        let id_insert = insert_base.with_offset(insert_offsets.1);
-        let id_next = next_base.with_offset(next_offsets.0);
-        let n = num_insertable(&id_insert, &id_next, text_len);
-        if n < text_len {
-            let id_low = insert_base.with_offset(insert_offsets.1-1);
-            let id_high = next_base.with_offset(next_offsets.0);
-            return insert_new_block(doc, &id_low, &id_high, text, site, None);   
-        }
-    }
-    doc.blocks.extend_content(block, &text, path);
-    return Operation 
-    { op_type: OperationType::Insert, 
-        ids: vec![(doc.blocks.node_base_id(block).clone(), vec![insert_offsets.1])],
-        payload: Some(text), 
-        site: site, 
-        clock: doc.state.local_clock 
-    }
-}
-
-fn insert_new_block(doc: &mut Document, id_low: &Id, id_high: &Id, text: String, site: u32, id: Option<&Id>) -> Operation {
-    let base = {
-        if id.is_none() { generate_base(id_low, id_high, &mut doc.state) }
-        else { id.unwrap().clone() }
-    };
-    let _size = text.chars().count() as u32;
-    doc.blocks.insert_by_id(site, base.clone(), 0, text.clone());
-    return Operation 
-    { op_type: OperationType::Insert, 
-        ids: vec![(base, vec![0])], 
-        payload: Some(text), 
-        site: site, 
-        clock: doc.state.local_clock 
-    }
-}
-
-fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Vec<usize>, sp: u32, site: u32, id: Option<&Id>) -> Operation {
-    // sp is the split point 
-    let base_id = doc.blocks.node_base_id(block).clone();
-    let offsets = doc.blocks.node_ranges(block);
-    let owner = doc.blocks.node_creator(block);
-
-    // Create 2 new blocks with the content split at sp 
-    let content = doc.blocks.node_content(Some(block));
-    let lcontent = content.chars().take(sp as usize).collect::<String>();
-    let rcontent = content.chars().skip(sp as usize).collect::<String>();
-    
-    let res = doc.blocks.delete_by_id(base_id.clone(), offsets.0);
-    if res.is_err() {
-        panic!("Error deleting block during split");
-    }
-
-    doc.blocks.insert_by_id(owner, base_id.clone(), offsets.0, lcontent.clone());    
-    doc.blocks.insert_by_id(owner, base_id.clone(), offsets.0 + sp, rcontent.clone());
-
-    // Insert the new block in between
-    let id_low = base_id.with_offset(offsets.0 + sp - 1);
-    let id_high = base_id.with_offset(offsets.0 + sp);
-
-    let new_id: Identifier = if let Some(id) = id {
-        id.clone()
-    } else {
-        generate_base(&id_low, &id_high, &mut doc.state)
-    };
-    doc.blocks.insert_by_id(site, new_id.clone(), 0, text.clone());
-    return Operation 
-    { op_type: OperationType::Insert, 
-        ids: vec![(new_id, vec![0])], 
-        payload: Some(text), 
-        site: site, 
-        clock: doc.state.local_clock 
-     }
-}
-
-fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
-    // Invariant: Size of text passed to the localInsert is less than MAXVALUE 
-    // assert!(text.chars().count() as u32 <= MAX_VALUE);
-
-    // Make pos the end of the document if it is greater than the document size
-    let doc_size = doc.read().chars().count();
-    let pos = if pos > doc_size { doc_size } else { pos };
-
-    let (path, covered) = doc.blocks.find_by_pos(pos);
-    if path.is_empty() {
-        return insert_new_block(doc, &Identifier {id: vec![]}, &Identifier {id: vec![]} , text, doc.state.replica, None);
-    }
-
-    let block = path.last().expect("Path should not be empty");
-    let block_base = doc.blocks.node_base_id(*block);
-    let block_ranges = doc.blocks.node_ranges(*block);
-
-    // If we are inserting at the end of the block 
-    // And we are the creator and the block endpoint is maximal 
-    let block_start = covered;
-    let block_end = block_start + doc.blocks.node_size(Some(*block));
-    if pos == block_end {
-       if doc.blocks.node_creator(*block) == doc.state.replica {
-            let block_ranges = doc.blocks.node_ranges(*block);
-            // FIXME MAYBE, changed node_base_offsets
-            let base_ranges = doc.blocks.node_base_offsets(*block);
-            if block_ranges.1 == base_ranges.1 {
-                return extend_block(doc, text, *block, &path, doc.state.replica);
-            }
-       }
-
-       // It cannot be extended, insert one new block after this block
-       let id_low = block_base.with_offset(block_ranges.1 - 1);
-       let next = doc.blocks.next(*block, &path);
-       let id_high = if next.is_none() {
-            Identifier { id: vec![] }
-        } else {
-            let next_block = next.unwrap();
-            let next_base = doc.blocks.node_base_id(next_block);
-            let next_ranges = doc.blocks.node_ranges(next_block);
-            next_base.with_offset(next_ranges.0)
-        };
-        return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
-    }
-
-    // If we are inserting at the start of the block, create a new block and insert before this block
-    if pos == block_start {
-        let prev_block = doc.blocks.prev(*block, &path);
-        let id_low = if prev_block.is_none() {
-            Identifier { id: vec![] }
-        } else {
-            let prev_block = prev_block.unwrap();
-            let prev_base = doc.blocks.node_base_id(prev_block);
-            let prev_ranges = doc.blocks.node_ranges(prev_block);
-            prev_base.with_offset(prev_ranges.1-1)
-        };
-        let id_high = block_base.with_offset(block_ranges.0);
-        return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
-    }
-
-    // Split the block at the position and insert a new block in between
-    let sp = (pos - block_start) as u32;
-    if (sp > block_ranges.1 - block_ranges.0) || (sp == 0) {
-        // println!("invalid split point during insertion - block id is {:?}, block ranges are {:?}, split point is {}", doc.blocks.node_base_id(*block), doc.blocks.node_ranges(*block), sp);
-        // println!("Pos was: {}, block start was {}, block end was {}", pos, block_start, block_end);
-        // println!("Length of document content is {}", doc.read().chars().count());
-        doc.blocks.print_tree();
-        panic!("Invalid split point - split point: {}, block size: {}", sp, block_ranges.1 - block_ranges.0);
-    }
-    return split_and_insert_block(doc, text, *block, &path, sp, doc.state.replica, None);
-}
-
-fn remote_insert(doc: &mut Document, op: &Operation) {
-    let val = op.ids[0].clone();
-    let base  = val.0;
-    let offset = val.1[0];
-    let text = op.payload.as_ref().expect("No payload for insert operation");
-    let site = op.site;
-
-    // Find and insert this id 
-    doc.blocks.insert_by_id(site, base, offset, text.to_string());
-}
-
-fn delete_and_split(doc: &mut Document, block: usize, _path: &Vec<usize>, left: usize, n: usize) {
-    // Prepare the 2 blocks after the split 
-    let base_id = doc.blocks.node_base_id(block).clone();
-    let offsets = doc.blocks.node_ranges(block);
-    let creator = doc.blocks.node_creator(block);
-
-    let content = doc.blocks.node_content(Some(block));
-    let lcontent = content.chars().take(left as usize).collect::<String>();
-    let rcontent = content.chars().skip((left+n) as usize).collect::<String>();
-
-    let res = doc.blocks.delete_by_id(base_id.clone(), offsets.0);
-    if res.is_err() {
-        panic!("Error deleting block during delete and split");
-    }
-
-    doc.blocks.insert_by_id(creator, base_id.clone(), offsets.0, lcontent, );
-    doc.blocks.insert_by_id(creator, base_id.clone(), offsets.0 + (left+n) as u32, rcontent);
-}
-
-fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
-    // Collect all the IDs of the elements to be deleted 
-    // Cases: 
-    // 1. The entire block is deleted
-    // 2. We are deleting at the end of the block
-    // 3. We are deleting at the start of the block
-    // 4. We are deleting in the middle of the block
-    // Find the index of from 
-
-    let mut num_delete = to - from;
-    let mut del_info: Vec<(Id, Vec<u32>)> = vec![];
-
-    let curr = from;
-
-    while num_delete > 0 {
-        let (path, covered) = doc.blocks.find_by_pos_delete(curr);
-        if path.is_empty() {
-            panic!("Cannot delete from an empty document");
-        }
-
-        let block = *path.last().unwrap();
-        let mut indices : Vec<(Id, Vec<u32>)> = vec![];
-        let offset = covered;
-        let block_size = doc.blocks.node_size(Some(block));
-        
-        let start_del = curr - offset;
-        let end_del = start_del + num_delete;
-
-        let base_id = doc.blocks.node_base_id(block);
-        let block_ranges = doc.blocks.node_ranges(block);
-
-        if start_del == 0 && end_del >= block_size {
-            let del_offsets = (block_ranges.0..block_ranges.1).collect::<Vec<u32>>();
-            indices.push((base_id.clone(), del_offsets));
-            num_delete -= block_size;
-            let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
-            if res.is_err() {
-                panic!("Error deleting block");
-            }
-        } else if start_del == 0 { 
-            // Case 2: delete some chars from the start of the block 
-            let del_offsets = (block_ranges.0..block_ranges.0+end_del as u32).collect::<Vec<u32>>();
-            indices.push((base_id.clone(), del_offsets));
-            doc.blocks.truncate_content(block, num_delete, DelLocation::Start, &path);
-            num_delete = 0;
-        } else if end_del >= block_size {
-            // Case 3: delete some chars from the end of the block
-            let del_offsets = (block_ranges.0+start_del as u32..block_ranges.1).collect::<Vec<u32>>();
-            indices.push((base_id.clone(), del_offsets));
-            doc.blocks.truncate_content(block, block_size - start_del, DelLocation::End, &path);
-            num_delete -= block_size - start_del;
-        } else {
-            let del_offsets = (block_ranges.0+start_del as u32..block_ranges.0+end_del as u32).collect::<Vec<u32>>();
-            indices.push((base_id.clone(), del_offsets));
-            delete_and_split(doc, block, &path, start_del, num_delete);
-            num_delete = 0;
-        }
-        del_info.extend(indices);
-    }
-
-    return Operation 
-    { op_type: OperationType::Delete, 
-        ids: del_info, 
-        payload: None, 
-        site: doc.state.replica, 
-        clock: doc.state.local_clock 
-    };
-}
-
-fn remote_delete(doc: &mut Document, op: &Operation) {
-    let del_ids = &op.ids;
-
-    for (id, offsets) in del_ids {
-        
-        let mut processed = 0;
-        while processed < offsets.len() {
-            // Find the block with this base ID + first (smallest) offset
-            let path = doc.blocks.find_by_id(id.clone(), offsets[processed]);
-            if path.is_empty() {
-                // Assume already 
-                processed += 1;
-                continue;
-            }
-            // Verify if the base id of the blocks are the same else continue 
-            if doc.blocks.node_base_id(*path.last().unwrap()) != id {
-                // FIXME: May need to be handled separately
-                eprintln!("Base ID of the block does not match the ID in delete operation, skipping this offset");
-                processed += 1;
-                continue;
-            }
-            let block: usize = *path.last().unwrap();
-            let base_id = doc.blocks.node_base_id(block);
-            let block_ranges = doc.blocks.node_ranges(block);
-            let block_size = block_ranges.1 - block_ranges.0;
-            let offset = offsets[processed];
-            // let n_delete = offsets.len();
-
-            // Count how many of the remaining offsets fall inside this node.
-            // Offsets are always a contiguous range, and this node covers
-            // [block_ranges.0, block_ranges.1), so a simple take_while works.
-            let n_in_block = offsets[processed..]
-                .iter()
-                .take_while(|&&o| o >= block_ranges.0 && o < block_ranges.1)
-                .count();
-            
-            // Same 4 cases as local delete
-            if offset == block_ranges.0 && n_in_block >= block_size as usize {
-                // Case 1: delete the entire block 
-                let res = doc.blocks.delete_by_id(base_id.clone(), block_ranges.0);
-                if res.is_err() {
-                    panic!("Error deleting block during remote delete");
-                }
-            } else if offset == block_ranges.0 {
-                doc.blocks.truncate_content(block, n_in_block, DelLocation::Start, &path);
-            } else if offset + n_in_block as u32 >= block_ranges.1 {
-                doc.blocks.truncate_content(block, n_in_block, DelLocation::End, &path);
-            } else {
-                let sp = (offset - block_ranges.0) as usize;
-                delete_and_split(doc, block, &path, sp, n_in_block);
-            }
-            processed += n_in_block;
-        }
+    pub fn reset(&mut self) {
+        self.network.reset();
     }
 }
 
 #[test]
 fn ab() {
-    let mut doc = Document::new(0);
-    doc.ins(0,"a".to_string());
-    doc.ins(1,"b".to_string());
-    assert_eq!(doc.read(), "ab".to_string());
+    let mut sys = LogootSplitSystem::new(1);
+
+    sys.ins(0, 0, "a".to_string());
+    sys.ins(0, 1, "b".to_string());
+
+    assert_eq!(sys.read(0), "ab".to_string());
 }
 
 #[test]
 fn abc() {
-    let mut doc = Document::new(0);
-    doc.ins(0,"a".to_string());
-    doc.ins(1,"b".to_string());
-    doc.ins(2,"c".to_string());
+    let mut sys = LogootSplitSystem::new(1);
 
-    assert_eq!(doc.read(), "abc".to_string());
-    // panic!("just to debug...");
+    sys.ins(0, 0, "a".to_string());
+    sys.ins(0, 1, "b".to_string());
+    sys.ins(0, 2, "c".to_string());
+
+    assert_eq!(sys.read(0), "abc".to_string());
 }
 
 #[test]
 fn simple_test_1() {
-    let mut d0 = Document::new(0);
-    let mut d1 = Document::new(1);
+    let mut sys = LogootSplitSystem::new(2);
 
-    d1.ins(0, "c".to_string());
-    d0.ins(0, "b".to_string());
+    sys.ins(1, 0, "c".to_string());
+    sys.ins(0, 0, "b".to_string());
 
-    d1.ins(0, "b".to_string());
-    d0.ins(1, "c".to_string());
+    sys.ins(1, 0, "b".to_string());
+    sys.ins(0, 1, "c".to_string());
 
-    d0.merge_from(&d1);
-    d1.merge_from(&d0);
-    assert_eq!(d0.read(), d1.read());
+    sys.merge_from(0, 1);
+    sys.merge_from(1, 0);
 
-    d0.ins(1, "b".to_string());
+    assert_eq!(sys.read(0), sys.read(1));
 
-    d0.merge_from(&d1);
-    d1.merge_from(&d0);
-    assert_eq!(d0.read(), d1.read());
+    sys.ins(0, 1, "b".to_string());
+
+    sys.merge_from(0, 1);
+    sys.merge_from(1, 0);
+
+    assert_eq!(sys.read(0), sys.read(1));
 }
 
 #[test]
 fn test_interleaved_inserts() {
-    let mut a = Document::new(0);
-    let mut b = Document::new(1);
+    let mut sys = LogootSplitSystem::new(2);
 
-    a.ins(0, "A".to_string());
-    a.ins(1, "B".to_string());
+    sys.ins(0, 0, "A".to_string());
+    sys.ins(0, 1, "B".to_string());
 
-    a.blocks.print_tree();
+    sys.ins(1, 0, "X".to_string());
+    sys.ins(1, 1, "Y".to_string());
 
-    b.ins(0, "X".to_string());
-    b.ins(1, "Y".to_string());
+    sys.merge_from(0, 1);
+    sys.merge_from(1, 0);
 
-    b.blocks.print_tree();
-
-    a.merge_from(&b);
-    a.blocks.print_tree();
-    b.merge_from(&a);
-
-    assert_eq!(a.read(), b.read());
+    assert_eq!(sys.read(0), sys.read(1));
 }
 
 #[allow(dead_code)]
@@ -545,63 +116,56 @@ fn run_insert_delete(seed: u64) {
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let mut docs = vec![
-        Document::new(0),
-        Document::new(1),
-        // Document::new(2),
-    ];
+    let mut sys = LogootSplitSystem::new(2);
+    let doc_ids = vec![0u32, 1u32];
 
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
 
     for _ in 0..200 {
-        let i = rng.random_range(0..docs.len());
-        let doc = &mut docs[i];
-        let len = doc.read().chars().count();
+        let i = rng.random_range(0..doc_ids.len());
+        let doc_id = doc_ids[i];
 
-        // 30% chance to delete if there's something to delete
+        let content = sys.read(doc_id);
+        let len = content.chars().count();
+
+        // 30% delete
         if len > 0 && rng.random_range(0..10) < 3 {
             let from = rng.random_range(0..len);
-            let to = rng.random_range(from+1..=len);
-            doc.del(from, to);
+            let to = rng.random_range(from + 1..=len);
+            // println!("Deleting from {} to {} in doc {}", from, to, doc_id);
+            sys.del(doc_id, from, to);
         } else {
             let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
             let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
-            doc.ins(pos, ch);
+            // println!("Inserting '{}' at {} in doc {}", ch, pos, doc_id);
+            sys.ins(doc_id, pos, ch);
         }
 
         // random merge
-        let a = rng.random_range(0..docs.len());
-        let b = rng.random_range(0..docs.len());
-        if a == b { continue; }
+        let a = doc_ids[rng.random_range(0..doc_ids.len())];
+        let b = doc_ids[rng.random_range(0..doc_ids.len())];
 
-        let (left, right) = if a < b {
-            let (l, r) = docs.split_at_mut(b);
-            (&mut l[a], &mut r[0])
-        } else {
-            let (l, r) = docs.split_at_mut(a);
-            (&mut r[0], &mut l[b])
-        };
+        if a != b {
+            sys.merge_from(a, b);
+            sys.merge_from(b, a);
+        }
 
-        let clone = right.clone();
-        left.merge_from(&clone);
+        let r0 = sys.read(a);
+        let r1 = sys.read(b);
 
-        let clone2 = left.clone();
-        right.merge_from(&clone2);
-
-        if left.read() != right.read() {
+        if r0 != r1 {
             println!("Divergence detected at seed {}!", seed);
-            left.blocks.print_tree();   
-            println!("---");
-            right.blocks.print_tree();
+            // sys.network.documents[sys.network.index_of(a)].blocks.print_tree();
+            // sys.network.documents[sys.network.index_of(b)].blocks.print_tree();
         }
 
         assert_eq!(
-            left.read(),
-            right.read(),
+            r0,
+            r1,
             "Seed {} diverged\n'{}' vs '{}'",
             seed,
-            left.read(),
-            right.read()
+            r0,
+            r1
         );
     }
 }
@@ -609,7 +173,380 @@ fn run_insert_delete(seed: u64) {
 #[test]
 fn test_insert_delete_heavy() {
     for i in 0..1000 {
-        println!("Running seed {}", i); 
+        println!("Running seed {}", i);
         run_insert_delete(i);
+    }
+}
+
+#[allow(dead_code)]
+fn run_async_ops(seed: u64) {
+    use rand::{SeedableRng, RngExt};
+    use rand::rngs::StdRng;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let n_agents = 100;
+    let mut sys = LogootSplitSystem::new(n_agents);
+    let doc_ids: Vec<u32> = (0..n_agents).map(|i| i as u32).collect();
+
+    let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+
+    for _ in 0..100 {
+        let i = rng.random_range(0..doc_ids.len());
+        let doc_id = doc_ids[i];
+
+        let content = sys.read(doc_id);
+        let len = content.chars().count();
+
+        // 30% delete
+        if len > 0 && rng.random_range(0..10) < 3 {
+            let from = rng.random_range(0..len);
+            let to = rng.random_range(from + 1..=len);
+            // println!("Deleting from {} to {} in doc {}", from, to, doc_id);
+            sys.del(doc_id, from, to);
+        } else {
+            let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
+            let ch = alphabet[rng.random_range(0..alphabet.len())].to_string();
+            // println!("Inserting '{}' at {} in doc {}", ch, pos, doc_id);
+            sys.ins(doc_id, pos, ch);
+        }
+
+        // do periodic sync_all merges (generate rng between 1-10, if 5 do a full sync)
+        if rng.random_range(1..=100) == 50 {
+            // println!("Performing full sync at seed {}", seed);
+            sys.network.sync_all();
+
+            // Check for convergence
+            for &a in &doc_ids {
+                for &b in &doc_ids {
+                    if a != b {
+                        let r0 = sys.read(a);
+                        let r1 = sys.read(b);
+
+                        if r0 != r1 {
+                            println!("Divergence detected between doc {} and {} at seed {}!", a, b, seed);
+                        }
+
+                        assert_eq!(
+                            r0,
+                            r1,
+                            "Seed {} diverged between doc {} and {}\n'{}' vs '{}'",
+                            seed,
+                            a,
+                            b,
+                            r0,
+                            r1
+                        );
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+#[test]
+fn test_async_ops() {
+    for i in 0..10 {
+        println!("Running async ops seed {}", i);
+        run_async_ops(i);
+    }
+}
+
+#[test]
+fn test_contrived_async() {
+    let mut sys = LogootSplitSystem::new(3);
+
+    // Insert aaaaaaaaaa in doc 0
+    sys.ins(0, 0, "aaaaaaaaaa".to_string());
+
+    // Sync with doc 1
+    sys.merge_from(1, 0);
+
+    // Insert b into doc 1
+    sys.ins(1, 5, "b".to_string());
+
+    // Sync 2 with doc 1 (before doc 2 has seen the insert of aaaa..)
+    sys.merge_from(2, 1);
+
+    // Now sync 2 with 0
+    sys.merge_from(2, 0);
+
+    // Finally sync 0 with 1 to see the insert of b
+    sys.merge_from(0, 1);
+
+    // All docs should converge to aaaaaabaaaa
+    let expected = "aaaaabaaaaa".to_string();
+
+    // Print tree for all 
+    for i in 0..3 {
+        println!("Doc {} content: '{}'", i, sys.read(i));
+        sys.network.documents[sys.network.index_of(i)].blocks.print_tree();
+    }
+
+
+    assert_eq!(sys.read(0), expected);
+    assert_eq!(sys.read(1), expected);
+    assert_eq!(sys.read(2), expected);
+}
+
+#[test]
+fn test_b2_inside_b1_two_children_before_parent() {
+    // More stress: two different child blocks from two different sites
+    // both arrive at site 2 before the parent block does.
+    // Both children sit inside the parent's identifier space.
+
+    let mut sys = LogootSplitSystem::new(3);
+
+    sys.ins(0, 0, "ABCDEFGH".to_string());
+
+    // Site 1 splits near the start
+    sys.merge_from(1, 0);
+    sys.ins(1, 1, "P".to_string());
+
+    // Site 2 splits near the end — before receiving from site 0
+    // (site 2 hasn't seen the base block yet, it will receive children first)
+    sys.merge_from(2, 1);   // child from site 1 arrives on site 2
+    // Site 2 now does its own insert — it only knows about site 1's child
+    sys.ins(2, 0, "Q".to_string());
+    
+    // Now the parent from site 0 arrives on site 2 last
+    sys.merge_from(2, 0);   // parent arrives → B2InsideB1 for site 1's child
+
+    // Full convergence
+    sys.merge_from(0, 1);
+    sys.merge_from(0, 2);
+    sys.merge_from(1, 2);
+    sys.merge_from(1, 0);
+    sys.merge_from(2, 0);
+    sys.merge_from(2, 1);
+
+    let r0 = sys.read(0);
+    let r1 = sys.read(1);
+    let r2 = sys.read(2);
+
+    assert_eq!(r0, r1, "0 vs 1: '{}' vs '{}'", r0, r1);
+    assert_eq!(r1, r2, "1 vs 2: '{}' vs '{}'", r1, r2);
+}
+
+#[test]
+fn test_b2_inside_b1_with_delete() {
+    // Same out-of-order scenario, but site 2 also deletes from the child
+    // before the parent arrives. This is the nastiest variant because
+    // remote_delete may have already modified the child node's offsets,
+    // and then the parent insert tries to split around it.
+
+    let mut sys = LogootSplitSystem::new(3);
+
+    sys.ins(0, 0, "ABCDE".to_string());
+
+    sys.merge_from(1, 0);
+    sys.ins(1, 2, "XYZ".to_string());  // child block with 3 chars
+
+    // Site 2 gets the child first, then deletes one char from it
+    sys.merge_from(2, 1);
+    sys.del(2, 2, 3);                  // delete 'Y' from site 2's view
+
+    // Parent arrives late on site 2
+    sys.merge_from(2, 0);
+
+    // Full sync
+    sys.merge_from(0, 1);
+    sys.merge_from(0, 2);
+    sys.merge_from(1, 2);
+    sys.merge_from(1, 0);
+    sys.merge_from(2, 1);
+
+    let r0 = sys.read(0);
+    let r1 = sys.read(1);
+    let r2 = sys.read(2);
+
+    assert_eq!(r0, r1, "0 vs 1: '{}' vs '{}'", r0, r1);
+    assert_eq!(r1, r2, "1 vs 2: '{}' vs '{}'", r1, r2);
+}
+
+#[cfg(test)]
+mod b2_inside_b1_stress {
+    use super::*;
+    use rand::{SeedableRng, RngExt};
+    use rand::rngs::StdRng;
+    use crate::operation::Operation;
+
+    /// A network where ops are queued and can be delivered in any order.
+    /// This lets us specifically engineer child-before-parent scenarios.
+    struct ManualNetwork {
+        docs: Vec<Document>,
+        /// pending[i] = ops queued for delivery to doc i, not yet applied
+        pending: Vec<Vec<Operation>>,
+    }
+
+    impl ManualNetwork {
+        fn new(n: usize) -> Self {
+            let docs = (0..n as u32).map(Document::new).collect();
+            let pending = vec![vec![]; n];
+            ManualNetwork { docs, pending }
+        }
+
+        /// Perform a local insert on site `site`, queue the op for all others
+        fn ins(&mut self, site: usize, pos: usize, text: String) -> Operation {
+            let op = self.docs[site].ins(pos, text).unwrap();
+            for (i, q) in self.pending.iter_mut().enumerate() {
+                if i != site {
+                    q.push(op.clone());
+                }
+            }
+            op
+        }
+
+        fn del(&mut self, site: usize, from: usize, to: usize) -> Operation {
+            let op = self.docs[site].del(from, to);
+            for (i, q) in self.pending.iter_mut().enumerate() {
+                if i != site {
+                    q.push(op.clone());
+                }
+            }
+            op
+        }
+
+        /// Deliver the op at index `op_idx` in site `site`'s queue
+        fn deliver(&mut self, site: usize, op_idx: usize) {
+            let op = self.pending[site].remove(op_idx);
+            println!("Delivering op from site {} to site {}: {:?}", op.site, site, op);
+            self.docs[site].apply_op(&op);
+        }
+
+        /// Deliver all pending ops to all sites in a random order
+        fn drain_random(&mut self, rng: &mut impl rand::Rng) {
+            loop {
+                // collect (site, queue_len) for all sites with pending ops
+                let candidates: Vec<usize> = self.pending.iter()
+                    .enumerate()
+                    .filter(|(_, q)| !q.is_empty())
+                    .map(|(i, _)| i)
+                    .collect();
+
+                if candidates.is_empty() { break; }
+
+                let site = candidates[rng.random_range(0..candidates.len())];
+                let q_len = self.pending[site].len();
+                let op_idx = rng.random_range(0..q_len);
+                self.deliver(site, op_idx);
+            }
+        }
+
+        fn read(&mut self, site: usize) -> String {
+            self.docs[site].read()
+        }
+
+        fn assert_convergence(&mut self) {
+            let contents: Vec<String> = (0..self.docs.len())
+                .map(|i| self.docs[i].read())
+                .collect();
+            for i in 1..contents.len() {
+                assert_eq!(
+                    contents[0], contents[i],
+                    "Divergence between site 0 and site {}: '{}' vs '{}'",
+                    i, contents[0], contents[i]
+                );
+            }
+        }
+    }
+
+    /// Core scenario: site 0 inserts a wide block, site 1 sees it and inserts
+    /// a child inside it, site 2 gets the child FIRST then the parent.
+    /// Permute the order of the remaining deliveries randomly.
+    fn run_child_before_parent(seed: u64) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut net = ManualNetwork::new(3);
+
+        // Site 0: insert a wide block — this becomes the "parent"
+        net.ins(0, 0, "ABCDEFGHIJ".to_string());
+
+        // Deliver parent to site 1 only (site 2 stays ignorant for now)
+        // Sites 1's queue has the op at index 0, deliver it
+        net.deliver(1, 0); // site 1 now knows about "ABCDEFGHIJ"
+        // Site 2's queue still has the parent op pending (not delivered yet)
+
+        // Site 1: insert a child inside the parent's identifier space
+        let split_pos = rng.random_range(1..10);
+        net.ins(1, split_pos, "X".to_string());
+
+        // Now site 2 gets site 1's child op BEFORE the parent from site 0
+        // Site 2's pending queue: [parent_from_0, child_from_1]
+        // We want to deliver child_from_1 (index 1) before parent_from_0 (index 0)
+        net.deliver(2, 1); // child arrives on site 2 first — B2InsideB1 triggered later
+        net.deliver(2, 0); // parent arrives — insert_rec hits B2InsideB1
+
+        // Drain everything else randomly
+        net.drain_random(&mut rng);
+        // Check if anybody still has something in pending!
+        net.assert_convergence();
+    }
+
+    /// Deeper stress: multiple rounds of wide-block + child insertions with
+    /// random out-of-order delivery across N sites.
+    fn run_deep_stress(seed: u64) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let n = 3;
+        let mut net = ManualNetwork::new(n);
+
+        let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+
+        for round in 0..40 {
+            let site = rng.random_range(0..n);
+            let content = net.read(site);
+            let len = content.chars().count();
+
+            if len > 1 && rng.random_range(0..10) < 3 {
+                let from = rng.random_range(0..len);
+                let to = rng.random_range(from+1..=len);
+                // println!("Round {}: Deleting from {} to {} in site {}", round, from, to, site);
+                net.del(site, from, to);
+            } else {
+                let pos = if len == 0 { 0 } else { rng.random_range(0..=len) };
+                let ch = alphabet[rng.random_range(0..26)].to_string();
+                // println!("Round {}: Inserting '{}' at pos {} in site {}", round, ch, pos, site);
+                net.ins(site, pos, ch);
+            }
+
+            // Every ~5 rounds, randomly drain some (not all) pending ops
+            // to simulate partial, out-of-order delivery
+            if round % 5 == 0 {
+                for _ in 0..rng.random_range(0..8) {
+                    let candidates: Vec<usize> = net.pending.iter()
+                        .enumerate()
+                        .filter(|(_, q)| !q.is_empty())
+                        .map(|(i, _)| i)
+                        .collect();
+                    if candidates.is_empty() { break; }
+                    let s = candidates[rng.random_range(0..candidates.len())];
+                    let qi = rng.random_range(0..net.pending[s].len());
+                    net.deliver(s, qi);
+                }
+                // Print all docs
+                for i in 0..n {
+                    // println!("Site {} content: '{}'", i, net.read(i));
+                    net.docs[i].blocks.print_tree();
+                }
+            }
+        }
+
+        // Final full drain in random order, then check convergence
+        net.drain_random(&mut rng);
+        net.assert_convergence();
+    }
+
+    #[test]
+    fn test_child_before_parent_exhaustive() {
+        for seed in 0..500 {
+            run_child_before_parent(seed);
+        }
+    }
+
+    #[test]
+    fn test_deep_stress_random_delivery() {
+        for seed in 0..200 {
+            run_deep_stress(seed);
+        }
     }
 }
