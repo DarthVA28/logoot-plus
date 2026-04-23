@@ -8,7 +8,7 @@ pub struct Tree {
     pub nodes: Vec<Node>, 
     pub root: Option<usize>,
     free_list: Vec<usize>,
-    base_to_offsets: HashMap<String, (u32, u32)>
+    base_to_offsets: HashMap<Identifier, (u32, u32)>
 }
 
 pub enum DelLocation {
@@ -96,8 +96,8 @@ impl Tree {
 
     pub fn node_base_offsets(&self, node: usize) -> (u32, u32) { 
         // Get the offsets from the map
-        let base_str = self.nodes[node].base_id.to_string();
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base_str) {
+        let base_id = self.nodes[node].base_id.clone();
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             return (*lo, *hi)
         } else {
             panic!("Base offsets not found for node {}, this should not happen", node);
@@ -116,10 +116,10 @@ impl Tree {
         let added_size = text.chars().count();
         node.size += added_size;
         // update the offsets of the base 
-        let base_str = node.base_id.to_string();
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base_str) {
+        let base_id = node.base_id.clone();
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = hi + added_size as u32;
-            self.base_to_offsets.insert(base_str, (*lo, new_hi));
+            self.base_to_offsets.insert(base_id, (*lo, new_hi));
         } 
         for idx in path_to_root.iter().rev() {
             self.update_node(*idx);
@@ -360,7 +360,7 @@ impl Tree {
         let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
         if self.is_empty() {
             self.root = Some(idx);
-            self.base_to_offsets.insert(base.to_string(), (offset, offset + content.chars().count() as u32));
+            self.base_to_offsets.insert(base.clone(), (offset, offset + content.chars().count() as u32));
             return;
         }
         let from = self.root.unwrap();
@@ -368,12 +368,12 @@ impl Tree {
         let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
         self.insert_rec(idx, insert_interval, from, content, site);
         // Lookup in base to offsets map and modify the offsets accordingly
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base.to_string()) {
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
             // Modify the offsets accordingly
             let new_hi = std::cmp::max(*hi, offset + len);
-            self.base_to_offsets.insert(base.to_string(), (*lo, new_hi));
+            self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
         } else {
-            self.base_to_offsets.insert(base.to_string(), (offset, offset + len));
+            self.base_to_offsets.insert(base.clone(), (offset, offset + len));
         }
     }
 
@@ -463,7 +463,7 @@ impl Tree {
                     // We should also check if we are at upper edge of offsets for this block
                     // As a rule, we will not reinsert IDs which have already been inserted & deleted 
                     // check base to offsets map 
-                    if let Some((_, hi)) = self.base_to_offsets.get(&b2.base.to_string()) {
+                    if let Some((_, hi)) = self.base_to_offsets.get(&b2.base.clone()) {
                         if node_idi.lo < *hi {
                             let from_node = &mut self.nodes[from];
                             if let Some(r) = from_node.right {
