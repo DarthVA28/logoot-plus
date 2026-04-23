@@ -1,7 +1,7 @@
 use core::panic;
 use std::collections::HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, num_insertable};
+use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, num_insertable};
 
 #[derive(Clone, Debug)]
 pub struct Tree {
@@ -380,14 +380,15 @@ impl Tree {
     fn find_split_point(idi_short: &IdentifierInterval, id_long: &Id) -> u32 {
         let mut sp = 0;
         let text_len = idi_short.hi - idi_short.lo;
+        let id_long_slice = id_long.id.as_ref();
         for i in 0..text_len {
-            let id_elem = idi_short.base.with_offset(idi_short.lo + i);
-            if id_elem >= *id_long {
+            let id_elem = IdentifierRef { base: idi_short.base.id.as_ref(), extra: idi_short.lo + i };
+            if id_elem.cmp_slice(id_long_slice) != std::cmp::Ordering::Less {
                 break;
             }
-            sp+=1;
+            sp += 1;
         }
-        return sp;
+        sp
     }
 
     pub fn insert_rec(&mut self, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
@@ -491,7 +492,9 @@ impl Tree {
                         let r_base = self.node_base_id(r);
                         let r_offset = self.node_ranges(r).0;
                         let len = content.chars().count() as u32;
-                        let n_insertable= num_insertable(&node_idi.base.with_offset(node_idi.lo), &r_base.with_offset(r_offset), len);
+                        let id_insert = IdentifierRef::new(&node_idi.base, node_idi.lo);
+                        let id_next = IdentifierRef::new(r_base, r_offset);
+                        let n_insertable = num_insertable(id_insert, id_next, len);
                         let from_node = &mut self.nodes[from];
                         if n_insertable < len {
                             // FIXME: just go right, don't bother splitting for now
@@ -832,7 +835,9 @@ impl Tree {
             let curr_id = node.base_id.clone();
             let (lo, hi) = (node.offset, node.offset + node.size as u32);
             if let Some(prev) = prev_id {
-                if curr_id.with_offset(lo) <= prev.with_offset(prev_offsets.unwrap().1-1) {
+                let curr_lo = IdentifierRef::new(&curr_id, lo);
+                let prev_hi = IdentifierRef::new(&prev, prev_offsets.unwrap().1-1);
+                if curr_lo <= prev_hi {
                     eprintln!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
                     return false;
                 }

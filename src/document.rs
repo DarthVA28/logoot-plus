@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::tree::{DelLocation, Tree};
-use crate::identifier::{Id, Identifier, Range, generate_base, num_insertable};
+use crate::identifier::{Id, Identifier, IdentifierRef, Range, generate_base, num_insertable};
 use crate::state::State;
 use crate::operation::{OpLog, Operation, OperationType};
 // use rand::{RngExt, SeedableRng};
@@ -149,23 +149,27 @@ impl Document {
 fn extend_block(doc: &mut Document, text:String, block: usize, path: &Vec<usize>, site: u32) -> Operation {
     // Check if we can extend the block without clashing with the next block 
     let next = doc.blocks.next(block, path);
-    let insert_base = doc.blocks.node_base_id(block);
+    let insert_base = doc.blocks.node_base_id(block).clone();
     let insert_offsets = doc.blocks.node_ranges(block);
 
     if !next.is_none() {
         let text_len = text.chars().count() as u32;
         let nxt_block = next.unwrap();
         // Get bases and offsets for the block and the next block
-        let next_base = doc.blocks.node_base_id(nxt_block);
+        let next_base = doc.blocks.node_base_id(nxt_block).clone();
         let next_offsets: (u32, u32) = doc.blocks.node_ranges(nxt_block);
         // Get final IDs
-        let id_insert = insert_base.with_offset(insert_offsets.1);
-        let id_next = next_base.with_offset(next_offsets.0);
-        let n = num_insertable(&id_insert, &id_next, text_len);
+        let id_insert = IdentifierRef::new(&insert_base, insert_offsets.1);
+        let id_next = IdentifierRef::new(&next_base, next_offsets.0);
+        // let id_insert = insert_base.with_offset(insert_offsets.1);
+        // let id_next = next_base.with_offset(next_offsets.0);
+        let n = num_insertable(id_insert, id_next, text_len);
         if n < text_len {
-            let id_low = insert_base.with_offset(insert_offsets.1-1);
-            let id_high = next_base.with_offset(next_offsets.0);
-            return insert_new_block(doc, &id_low, &id_high, text, site, None);   
+            let id_low = IdentifierRef::new(&insert_base, insert_offsets.1-1);
+            let id_high = IdentifierRef::new(&next_base, next_offsets.0);
+            // let id_low = insert_base.with_offset(insert_offsets.1-1);
+            // let id_high = next_base.with_offset(next_offsets.0);
+            return insert_new_block(doc, id_low, id_high, text, site, None);   
         }
     }
     doc.blocks.extend_content(block, &text, path);
@@ -178,7 +182,7 @@ fn extend_block(doc: &mut Document, text:String, block: usize, path: &Vec<usize>
     }
 }
 
-fn insert_new_block(doc: &mut Document, id_low: &Id, id_high: &Id, text: String, site: u32, id: Option<&Id>) -> Operation {
+fn insert_new_block(doc: &mut Document, id_low: IdentifierRef<'_>, id_high: IdentifierRef<'_>, text: String, site: u32, id: Option<&Id>) -> Operation {
     let base = {
         if id.is_none() { generate_base(id_low, id_high, &mut doc.state) }
         else { id.unwrap().clone() }
@@ -214,13 +218,15 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
     doc.blocks.insert_by_id(owner, base_id.clone(), offsets.0 + sp, rcontent.clone());
 
     // Insert the new block in between
-    let id_low = base_id.with_offset(offsets.0 + sp - 1);
-    let id_high = base_id.with_offset(offsets.0 + sp);
+    let id_low = IdentifierRef::new(&base_id, offsets.0 + sp - 1);
+    let id_high = IdentifierRef::new(&base_id, offsets.0 + sp);
+    // let id_low = base_id.with_offset(offsets.0 + sp - 1);
+    // let id_high = base_id.with_offset(offsets.0 + sp);
 
     let new_id: Identifier = if let Some(id) = id {
         id.clone()
     } else {
-        generate_base(&id_low, &id_high, &mut doc.state)
+        generate_base(id_low, id_high, &mut doc.state)
     };
     doc.blocks.insert_by_id(site, new_id.clone(), 0, text.clone());
     return Operation 
@@ -242,11 +248,11 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
 
     let (path, covered) = doc.blocks.find_by_pos(pos);
     if path.is_empty() {
-        return insert_new_block(doc, &Identifier {id: vec![]}, &Identifier {id: vec![]} , text, doc.state.replica, None);
+        return insert_new_block(doc, IdentifierRef::doc_start(), IdentifierRef::doc_end(), text, doc.state.replica, None);
     }
 
     let block = path.last().expect("Path should not be empty");
-    let block_base = doc.blocks.node_base_id(*block);
+    let block_base = doc.blocks.node_base_id(*block).clone();
     let block_ranges = doc.blocks.node_ranges(*block);
 
     // If we are inserting at the end of the block 
@@ -264,32 +270,36 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
        }
 
        // It cannot be extended, insert one new block after this block
-       let id_low = block_base.with_offset(block_ranges.1 - 1);
+       let id_low=  IdentifierRef::new(&block_base, block_ranges.1-1);
+    //    let id_low = block_base.with_offset(block_ranges.1 - 1);
        let next = doc.blocks.next(*block, &path);
+       let next_base;
        let id_high = if next.is_none() {
-            Identifier { id: vec![] }
+            IdentifierRef::doc_end()
         } else {
             let next_block = next.unwrap();
-            let next_base = doc.blocks.node_base_id(next_block);
+            next_base = doc.blocks.node_base_id(next_block).clone();
             let next_ranges = doc.blocks.node_ranges(next_block);
-            next_base.with_offset(next_ranges.0)
+            let next_base_with_offset = IdentifierRef::new(&next_base, next_ranges.0);
+            next_base_with_offset
         };
-        return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
+        return insert_new_block(doc, id_low, id_high, text, doc.state.replica, None);
     }
 
     // If we are inserting at the start of the block, create a new block and insert before this block
     if pos == block_start {
         let prev_block = doc.blocks.prev(*block, &path);
+        let prev_base;
         let id_low = if prev_block.is_none() {
-            Identifier { id: vec![] }
+            IdentifierRef::doc_start()
         } else {
             let prev_block = prev_block.unwrap();
-            let prev_base = doc.blocks.node_base_id(prev_block);
+            prev_base = doc.blocks.node_base_id(prev_block).clone();
             let prev_ranges = doc.blocks.node_ranges(prev_block);
-            prev_base.with_offset(prev_ranges.1-1)
+            IdentifierRef::new(&prev_base, prev_ranges.1 - 1)
         };
-        let id_high = block_base.with_offset(block_ranges.0);
-        return insert_new_block(doc, &id_low, &id_high, text, doc.state.replica, None);
+        let id_high = IdentifierRef::new(&block_base, block_ranges.0);
+        return insert_new_block(doc, id_low, id_high, text, doc.state.replica, None);
     }
 
     // Split the block at the position and insert a new block in between
