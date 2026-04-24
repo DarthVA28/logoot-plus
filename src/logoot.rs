@@ -172,8 +172,8 @@ fn run_insert_delete(seed: u64) {
 
 #[test]
 fn test_insert_delete_heavy() {
-    for i in 0..1000 {
-        println!("Running seed {}", i);
+    for i in 0..100000 {
+        // println!("Running seed {}", i);
         run_insert_delete(i);
     }
 }
@@ -278,12 +278,11 @@ fn test_contrived_async() {
     // All docs should converge to aaaaaabaaaa
     let expected = "aaaaabaaaaa".to_string();
 
-    // Print tree for all 
-    for i in 0..3 {
-        println!("Doc {} content: '{}'", i, sys.read(i));
-        sys.network.documents[sys.network.index_of(i)].blocks.print_tree();
-    }
-
+    // // Print tree for all 
+    // for i in 0..3 {
+    //     println!("Doc {} content: '{}'", i, sys.read(i));
+    //     sys.network.documents[sys.network.index_of(i)].blocks.print_tree();
+    // }
 
     assert_eq!(sys.read(0), expected);
     assert_eq!(sys.read(1), expected);
@@ -411,7 +410,7 @@ mod b2_inside_b1_stress {
         /// Deliver the op at index `op_idx` in site `site`'s queue
         fn deliver(&mut self, site: usize, op_idx: usize) {
             let op = self.pending[site].remove(op_idx);
-            println!("Delivering op from site {} to site {}: {:?}", op.site, site, op);
+            // println!("Delivering op from site {} to site {}: {:?}", op.site, site, op);
             self.docs[site].apply_op(&op);
         }
 
@@ -438,15 +437,15 @@ mod b2_inside_b1_stress {
             self.docs[site].read()
         }
 
-        fn assert_convergence(&mut self) {
+        fn assert_convergence(&mut self, seed: u64) {
             let contents: Vec<String> = (0..self.docs.len())
                 .map(|i| self.docs[i].read())
                 .collect();
             for i in 1..contents.len() {
                 assert_eq!(
                     contents[0], contents[i],
-                    "Divergence between site 0 and site {}: '{}' vs '{}'",
-                    i, contents[0], contents[i]
+                    "Seed: {} -- Divergence between site 0 and site {}: '{}' vs '{}'",
+                    seed, i, contents[0], contents[i]
                 );
             }
         }
@@ -480,7 +479,7 @@ mod b2_inside_b1_stress {
         // Drain everything else randomly
         net.drain_random(&mut rng);
         // Check if anybody still has something in pending!
-        net.assert_convergence();
+        net.assert_convergence(seed);
     }
 
     /// Deeper stress: multiple rounds of wide-block + child insertions with
@@ -524,29 +523,30 @@ mod b2_inside_b1_stress {
                     net.deliver(s, qi);
                 }
                 // Print all docs
-                for i in 0..n {
-                    // println!("Site {} content: '{}'", i, net.read(i));
-                    net.docs[i].blocks.print_tree();
-                }
+                // for i in 0..n {
+                //     println!("Site {} content: '{}'", i, net.read(i));
+                //     net.docs[i].blocks.print_tree();
+                // }
             }
         }
 
         // Final full drain in random order, then check convergence
         net.drain_random(&mut rng);
-        net.assert_convergence();
+        net.assert_convergence(seed);
     }
 
     #[test]
     fn test_child_before_parent_exhaustive() {
-        for seed in 0..500 {
+        for seed in 1000000..2000000 {
             run_child_before_parent(seed);
         }
     }
 
     #[test]
     fn test_deep_stress_random_delivery() {
-        for seed in 0..200 {
+        for seed in 1000000..2000000 {
             run_deep_stress(seed);
         }
+        // run_deep_stress(1219);
     }
 }

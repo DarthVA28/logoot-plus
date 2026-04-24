@@ -51,6 +51,9 @@ impl Document {
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
         }
+        // println!("After local insert at replica {}", self.state.replica);
+        // self.blocks.print_tree();
+
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
@@ -66,6 +69,8 @@ impl Document {
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
+        // println!("After local delete at replica {}", self.state.replica);
+        // self.blocks.print_tree();
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
@@ -94,7 +99,7 @@ impl Document {
         // We are ready to apply this operation, first record it in the oplog and then apply it
         match op.op_type {
             OperationType::Insert => {
-                // println!("Applying remote insert of '{}' at site {} at site {}", op.payload.as_ref().unwrap(), op.site, self.state.replica);
+                // println!("Applying remote insert of '{}' with id {:?} at site {} at site {}", op.payload.as_ref().unwrap(), op.ids, op.site, self.state.replica);
                 remote_insert(self, &op)
             },
             OperationType::Delete => {
@@ -109,6 +114,9 @@ impl Document {
                 panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
             }
         }
+
+        // println!("After applying op {:?} at site {}, tree:", op, self.state.replica);
+        // self.blocks.print_tree();
 
         // self.oplog.record_op(&op);
 
@@ -172,6 +180,8 @@ fn extend_block(doc: &mut Document, text:String, block: usize, path: &Path, site
             return insert_new_block(doc, id_low, id_high, text, site, None);   
         }
     }
+    // println!("Extending block {} with text '{}' at site {}", block, text, site);
+    // Print block
     doc.blocks.extend_content(block, &text, path);
     return Operation 
     { op_type: OperationType::Insert, 

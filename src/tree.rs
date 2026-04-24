@@ -362,9 +362,17 @@ impl Tree {
     /// Insert the node by identifier  
     pub fn insert_by_id(&mut self, site: u32, base: Id, offset: u32, content: String) {
         let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
+        let len = content.chars().count() as u32;
         if self.is_empty() {
             self.root = Some(idx);
-            self.base_to_offsets.insert(base.clone(), (offset, offset + content.chars().count() as u32));
+            if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
+                // Modify the offsets accordingly
+                let new_hi = std::cmp::max(*hi, offset + len);
+                self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
+            } else {
+                self.base_to_offsets.insert(base.clone(), (offset, offset + len));
+            }
+            // self.base_to_offsets.insert(base.clone(), (offset, offset + content.chars().count() as u32));
             return;
         }
         let from = self.root.unwrap();
