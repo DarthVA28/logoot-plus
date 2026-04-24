@@ -399,6 +399,7 @@ fn collect_targets(target: &Target, num_agents: usize) -> Result<Vec<usize>, Str
     }
 }
 
+#[allow(dead_code)]
 fn first_diff_char_index(a: &str, b: &str) -> Option<usize> {
     let mut ai = a.chars();
     let mut bi = b.chars();
