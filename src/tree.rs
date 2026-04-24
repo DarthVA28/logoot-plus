@@ -114,6 +114,10 @@ impl Tree {
         IdentifierInterval::new(base, offset, offset + self.nodes[node].size as u32)
     }
 
+    pub fn base_id_max_offset(&self, id: &Identifier) -> Option<u32> {
+        self.base_to_offsets.get(id).map(|(_, hi)| *hi)
+    }
+
     pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);

@@ -428,20 +428,40 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             // FIXME: place of inefficiency
             let path = doc.blocks.find_by_id_exact(id.clone(), start + processed);
             if path.is_empty() {
-                // Buffer this delete in pending, apply it later 
-                // println!("Block n'exist pas - buffering delete for id {:?} and offset {} at site {}", id, offsets[processed], doc.state.replica);
-                let partial_op = Operation { 
-                    op_type: OperationType::Delete, 
-                    // ids should have ALL the offsets 
-                    ids: vec![(id.clone(), start + processed, start + processed + 1)],
-                    // ids: vec![(id.clone(), vec![offsets[processed]])], 
-                    payload: None, 
-                    site: op.site, 
-                    clock: op.clock
+                // Base id not in tree at all
+                // Buffer the entire remaining range [start+processed, end) as ONE op.
+                if doc.blocks.base_id_max_offset(id).map_or(true, |hi| hi <= start + processed) {
+                    let partial_op = Operation {
+                        op_type: OperationType::Delete,
+                        ids: vec![(id.clone(), start + processed, *end)],
+                        payload: None,
+                        site: op.site,
+                        clock: op.clock,
+                    };
+                    doc.oplog.add_to_pending(partial_op);
+                    break; 
+                }
+
+                // base id exists but this offset is missing 
+                let missing_start = start + processed;
+                processed += 1;
+                while processed < offsets_len {
+                    if doc.blocks.find_by_id_exact(id.clone(), start + processed).is_empty() {
+                        processed += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let partial_op = Operation {
+                    op_type: OperationType::Delete,
+                    ids: vec![(id.clone(), missing_start, start + processed)],
+                    payload: None,
+                    site: op.site,
+                    clock: op.clock,
                 };
                 doc.oplog.add_to_pending(partial_op);
-                processed += 1;
                 continue;
+
             }
             // Verify if the base id of the blocks are the same else continue 
             if doc.blocks.node_base_id(*path.last().unwrap()) != id {

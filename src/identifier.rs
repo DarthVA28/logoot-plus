@@ -5,7 +5,7 @@ use crate::state::State;
 
 pub type Range = (u32, u32);
 pub const MIN_VALUE: u32 = 0;
-pub const MAX_VALUE: u32 = 100;
+pub const MAX_VALUE: u32 = 100000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct Identifier {

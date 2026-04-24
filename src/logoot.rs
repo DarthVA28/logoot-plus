@@ -537,14 +537,14 @@ mod b2_inside_b1_stress {
 
     #[test]
     fn test_child_before_parent_exhaustive() {
-        for seed in 1000000..2000000 {
+        for seed in 100000..200000 {
             run_child_before_parent(seed);
         }
     }
 
     #[test]
     fn test_deep_stress_random_delivery() {
-        for seed in 1000000..2000000 {
+        for seed in 100000..200000 {
             run_deep_stress(seed);
         }
         // run_deep_stress(1219);

@@ -191,14 +191,14 @@ fn generate_operations_impl(
     };
 
     // Final convergence check
-    // let num_agents = system.network.documents.len();
-    // system.network.sync_all();
-    // let expected = system.network.documents[0].read();
-    // for i in 1..num_agents {
-    //     let content = system.network.documents[i].read();
-    //     assert_eq!(content, expected, 
-    //         "convergence check failed: replica {} diverged from replica 0", i);
-    // }
+    let num_agents = system.network.documents.len();
+    system.network.sync_all();
+    let expected = system.network.documents[0].read();
+    for i in 1..num_agents {
+        let content = system.network.documents[i].read();
+        assert_eq!(content, expected, 
+            "convergence check failed: replica {} diverged from replica 0", i);
+    }
 
     println!("convergence check passed!");
 
