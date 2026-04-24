@@ -575,54 +575,6 @@ fn safe_merge_from(
     Ok(())
 }
 
-// fn schedule_txns(trace: &TraceFile) -> Result<Vec<usize>, String> {
-//     let n = trace.txns.len();
-//     for (idx, txn) in trace.txns.iter().enumerate() {
-//         for parent in &txn.parents {
-//             if *parent >= n {
-//                 return Err(format!(
-//                     "txn {} has out-of-bounds parent {} for txn_count {}",
-//                     idx, parent, n
-//                 ));
-//             }
-//         }
-//     }
-
-//     let mut done = vec![false; n];
-//     let mut order = Vec::with_capacity(n);
-
-//     while order.len() < n {
-//         let mut progressed = false;
-//         for (idx, txn) in trace.txns.iter().enumerate() {
-//             if done[idx] {
-//                 continue;
-//             }
-//             if txn.parents.iter().all(|p| done[*p]) {
-//                 done[idx] = true;
-//                 order.push(idx);
-//                 progressed = true;
-//             }
-//         }
-
-//         if !progressed {
-//             let blocked = trace
-//                 .txns
-//                 .iter()
-//                 .enumerate()
-//                 .filter(|(idx, _)| !done[*idx])
-//                 .map(|(idx, _)| idx.to_string())
-//                 .collect::<Vec<_>>()
-//                 .join(",");
-//             return Err(format!(
-//                 "unable to schedule transactions due to cyclic or unsatisfied parents; blocked txns: [{}]",
-//                 blocked
-//             ));
-//         }
-//     }
-
-//     Ok(order)
-// }
-
 fn schedule_txns(trace: &TraceFile) -> Result<Vec<usize>, String> {
     let n = trace.txns.len();
     let mut in_degree = vec![0usize; n];

@@ -2,7 +2,7 @@ use core::panic;
 // use std::collections::HashMap;
 use ahash::AHashMap as HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, num_insertable};
+use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
 use smallvec::SmallVec;
 
 pub type Path = SmallVec<[usize; 32]>;
@@ -417,10 +417,18 @@ impl Tree {
             
             // B1 is the block we are adding 
             // B2 is the block we are comparing with
-            let b1 = &mut node_idi;
-            let b2 = &self.node_get_identifier_interval(from);
+            // let b1 = &mut node_idi;
+            // let b2 = &self.node_get_identifier_interval(from);
 
-            match compare_intervals(b1, &b2) {
+            let relation = {
+                let n = &self.nodes[from];
+                compare_intervals_raw(
+                    &node_idi.base, node_idi.lo, node_idi.hi,
+                    &n.base_id, n.offset, n.offset + n.size as u32,
+                )
+            }; // shared borrow of self.nodes[from] released here
+
+            match relation {
                 IdOrderingRelation::B1AfterB2 => {
                     let from_node = &mut self.nodes[from];
                     if let Some(r) = from_node.right {
@@ -479,7 +487,10 @@ impl Tree {
                     // We should also check if we are at upper edge of offsets for this block
                     // As a rule, we will not reinsert IDs which have already been inserted & deleted 
                     // check base to offsets map 
-                    if let Some((_, hi)) = self.base_to_offsets.get(&b2.base.clone()) {
+                    let b2_base = {
+                        self.nodes[from].base_id.clone() // one clone, only in this rare branch
+                    };
+                    if let Some((_, hi)) = self.base_to_offsets.get(&b2_base) {
                         if node_idi.lo < *hi {
                             let from_node = &mut self.nodes[from];
                             if let Some(r) = from_node.right {
@@ -535,7 +546,12 @@ impl Tree {
                 IdOrderingRelation::B2InsideB1 => {
                     // println!("Covered...");
                     // Split the incoming node 
-                    let sp = Self::find_split_point(b1, &b2.base);
+                    let b1 = &mut node_idi;
+                    let sp = {
+                        let b2_base = &self.nodes[from].base_id;
+                        Self::find_split_point(&b1, b2_base)
+                    }; 
+
                     let left_content: String = content.chars().take(sp as usize).collect();
                     let right_content: String = content.chars().skip(sp as usize).collect();
 
@@ -734,7 +750,7 @@ impl Tree {
 
 pub struct InOrderIter<'a> {
     tree: &'a Tree,
-    stack: Vec<usize>,
+    stack: SmallVec<[usize; 32]>,
     current: Option<usize>,
 }
 
@@ -742,7 +758,7 @@ impl<'a> InOrderIter<'a> {
     pub fn new(tree: &'a Tree) -> Self {
         InOrderIter {
             tree,
-            stack: Vec::new(),
+            stack: SmallVec::new(),
             current: tree.root,
         }
     }

@@ -16,17 +16,6 @@ impl Identifier {
     pub fn new(id: Vec<u32>) -> Self {
         Identifier { id: Arc::from(id.as_slice()) }
     }
-
-    // pub fn with_offset(&self, offset: u32) -> Self {
-    //     let mut new_id = self.id.clone();
-    //     new_id.push(offset);
-    //     Identifier { id: new_id }
-    // }
-
-    // pub fn is_base_same(&self, other: &Identifier) -> bool {
-    //     // FIXME: 
-    //     self.id == other.id
-    // }
     
     pub fn to_string(&self) -> String {
         self.id.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(".")
@@ -93,11 +82,50 @@ impl PartialOrd for IdentifierRef<'_> {
     }
 }
 
+// impl Ord for IdentifierRef<'_> {
+//     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//         self.base.iter()
+//             .chain(std::iter::once(&self.extra))
+//             .cmp(other.base.iter().chain(std::iter::once(&other.extra)))
+//     }
+// }
+
+// impl Ord for IdentifierRef<'_> {
+//     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//         match self.base.cmp(other.base) {
+//             std::cmp::Ordering::Equal => self.extra.cmp(&other.extra),
+//             ord => ord,
+//         }
+//     }
+// }
+
 impl Ord for IdentifierRef<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.base.iter()
-            .chain(std::iter::once(&self.extra))
-            .cmp(other.base.iter().chain(std::iter::once(&other.extra)))
+        let min_base = self.base.len().min(other.base.len());
+        // Fast path
+        match self.base[..min_base].cmp(&other.base[..min_base]) {
+            std::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // Shared prefix equal 
+        match self.base.len().cmp(&other.base.len()) {
+            std::cmp::Ordering::Equal => {
+                self.extra.cmp(&other.extra)
+            }
+            std::cmp::Ordering::Less => {
+                match self.extra.cmp(&other.base[min_base]) {
+                    std::cmp::Ordering::Equal => std::cmp::Ordering::Less, 
+                    ord => ord,
+                }
+            }
+            std::cmp::Ordering::Greater => {
+                match self.base[min_base].cmp(&other.extra) {
+                    std::cmp::Ordering::Equal => std::cmp::Ordering::Greater, 
+                    ord => ord,
+                }
+            }
+        }
     }
 }
 
@@ -105,10 +133,6 @@ pub fn generate_base(id_low: IdentifierRef<'_>, id_high: IdentifierRef<'_>, stat
     let mut base = Vec::new();
     let mut low_iter = id_low.base.iter().copied().chain(std::iter::once(id_low.extra));
     let mut high_iter = id_high.base.iter().copied().chain(std::iter::once(id_high.extra));
-
-    // let mut low_iter = low_full.iter();
-    // let mut high_iter = id_high.id.iter();
-    // println!("Generating base between {:?} and {:?}", id_low, id_high);
     
     let mut l = low_iter.next().unwrap_or(MIN_VALUE);
     let mut h = high_iter.next().unwrap_or(MAX_VALUE);
@@ -165,47 +189,101 @@ pub enum IdOrderingRelation {
     B1EqualsB2
 }
 
-pub fn compare_intervals(b1: &IdentifierInterval, b2: &IdentifierInterval) -> IdOrderingRelation {
-    if b1.base == b2.base {
-        if b1.lo == b2.lo && b1.hi == b2.hi {
-            return IdOrderingRelation::B1EqualsB2
-        } else if b1.hi == b2.lo {
-            return IdOrderingRelation::B1ConcatB2
-        } else if b2.hi == b1.lo {
-            return IdOrderingRelation::B2ConcatB1
-        } else if b1.lo >= b2.lo && b1.hi <= b2.hi {
-            return IdOrderingRelation::B1InsideB2
-        } else if b2.lo >= b1.lo && b2.hi <= b1.hi {
-            return IdOrderingRelation::B2InsideB1
-        } else if b1.lo < b2.lo {
-            return IdOrderingRelation::B1BeforeB2
+#[inline(always)]
+pub fn compare_intervals_raw(
+    b1_base: &Identifier, b1_lo: u32, b1_hi: u32,
+    b2_base: &Identifier, b2_lo: u32, b2_hi: u32,
+) -> IdOrderingRelation {
+    if b1_base == b2_base {
+        if b1_lo == b2_lo && b1_hi == b2_hi {
+            return IdOrderingRelation::B1EqualsB2;
+        } else if b1_hi == b2_lo {
+            return IdOrderingRelation::B1ConcatB2;
+        } else if b2_hi == b1_lo {
+            return IdOrderingRelation::B2ConcatB1;
+        } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
+            return IdOrderingRelation::B1InsideB2;
+        } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
+            return IdOrderingRelation::B2InsideB1;
+        } else if b1_lo < b2_lo {
+            return IdOrderingRelation::B1BeforeB2;
         } else {
-            return IdOrderingRelation::B1AfterB2
+            return IdOrderingRelation::B1AfterB2;
         }
     }
 
-    // Different bases -- check if bases fall in each other's range
-    let b1_start = b1.id_begin();
-    let _b1_end = b1.id_end();
-    let b2_start = b2.id_begin();
-    let _b2_end = b2.id_end();
+    // Different bases.
+    // _b1_end and _b2_end are computed in the original but never used.
+    // b1_start and b1_begin are the same value in the original (id_begin called twice).
+    // We compute each once.
+    let b1_begin = IdentifierRef::new(b1_base, b1_lo);       // = b1.id_begin()
+    let b1_end   = IdentifierRef::new(b1_base, b1_hi - 1);   // = b1.id_end(), used in contains()
+    let b2_begin = IdentifierRef::new(b2_base, b2_lo);       // = b2.id_begin()
+    let b2_end   = IdentifierRef::new(b2_base, b2_hi - 1);   // = b2.id_end(), used in contains()
 
-    // Containment checks 
-    let b1_begin = b1.id_begin();
-    let b2_begin = b2.id_begin();
-
-    if b1.contains(b2_begin) {
-        return IdOrderingRelation::B2InsideB1
-    } else if b2.contains(b1_begin) {
-        return IdOrderingRelation::B1InsideB2
+    // b1.contains(b2_begin): b1.id_begin() < b2_begin && b2_begin < b1.id_end()
+    if b1_begin < b2_begin && b2_begin < b1_end {
+        return IdOrderingRelation::B2InsideB1;
+    }
+    // b2.contains(b1_begin): b2.id_begin() < b1_begin && b1_begin < b2.id_end()
+    if b2_begin < b1_begin && b1_begin < b2_end {
+        return IdOrderingRelation::B1InsideB2;
     }
 
-    if b1_start < b2_start {
-        return IdOrderingRelation::B1BeforeB2
+    // Final: b1_start < b2_start in original, which is b1_begin < b2_begin
+    if b1_begin < b2_begin {
+        IdOrderingRelation::B1BeforeB2
     } else {
-        return IdOrderingRelation::B1AfterB2
+        IdOrderingRelation::B1AfterB2
     }
 }
+
+#[inline(always)]
+pub fn compare_intervals(b1: &IdentifierInterval, b2: &IdentifierInterval) -> IdOrderingRelation {
+    compare_intervals_raw(&b1.base, b1.lo, b1.hi, &b2.base, b2.lo, b2.hi)
+}
+
+// pub fn compare_intervals(b1: &IdentifierInterval, b2: &IdentifierInterval) -> IdOrderingRelation {
+//     if b1.base == b2.base {
+//         if b1.lo == b2.lo && b1.hi == b2.hi {
+//             return IdOrderingRelation::B1EqualsB2
+//         } else if b1.hi == b2.lo {
+//             return IdOrderingRelation::B1ConcatB2
+//         } else if b2.hi == b1.lo {
+//             return IdOrderingRelation::B2ConcatB1
+//         } else if b1.lo >= b2.lo && b1.hi <= b2.hi {
+//             return IdOrderingRelation::B1InsideB2
+//         } else if b2.lo >= b1.lo && b2.hi <= b1.hi {
+//             return IdOrderingRelation::B2InsideB1
+//         } else if b1.lo < b2.lo {
+//             return IdOrderingRelation::B1BeforeB2
+//         } else {
+//             return IdOrderingRelation::B1AfterB2
+//         }
+//     }
+
+//     // Different bases -- check if bases fall in each other's range
+//     let b1_start = b1.id_begin();
+//     let _b1_end = b1.id_end();
+//     let b2_start = b2.id_begin();
+//     let _b2_end = b2.id_end();
+
+//     // Containment checks 
+//     let b1_begin = b1.id_begin();
+//     let b2_begin = b2.id_begin();
+
+//     if b1.contains(b2_begin) {
+//         return IdOrderingRelation::B2InsideB1
+//     } else if b2.contains(b1_begin) {
+//         return IdOrderingRelation::B1InsideB2
+//     }
+
+//     if b1_start < b2_start {
+//         return IdOrderingRelation::B1BeforeB2
+//     } else {
+//         return IdOrderingRelation::B1AfterB2
+//     }
+// }
 
 pub fn num_insertable(id_insert: IdentifierRef<'_>, id_next: IdentifierRef<'_>, length: u32) -> u32 { 
     let l = id_insert.base.len(); 
