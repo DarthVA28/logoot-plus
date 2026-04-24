@@ -544,7 +544,6 @@ impl Tree {
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
-                    // println!("Covered...");
                     // Split the incoming node 
                     let b1 = &mut node_idi;
                     let sp = {
