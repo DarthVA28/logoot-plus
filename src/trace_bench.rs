@@ -133,6 +133,11 @@ fn generate_operations_impl(
     let order = schedule_txns(&trace)?;
     let mut processed_txns = 0usize;
 
+    let ancestor_map: Vec<Vec<usize>> = (0..trace.txns.len())
+    .map(|i| ancestor_agents_for_txn(&trace, i))
+    .collect();
+
+
     for txn_idx in order {
         let txn = &trace.txns[txn_idx];
         if txn.agent >= trace.num_agents {
@@ -145,13 +150,13 @@ fn generate_operations_impl(
         let sender = txn.agent;
 
         // Bring sender replica up to the full causal frontier (including transitive parent deps).
-        let ancestor_agents = ancestor_agents_for_txn(&trace, txn_idx);
-        for agent in ancestor_agents {
-            if agent != sender {
+        // let ancestor_agents = ancestor_agents_for_txn(&trace, txn_idx);
+        for agent in &ancestor_map[txn_idx] {
+            if *agent != sender {
                 safe_merge_from(
                     &mut system,
                     sender,
-                    agent,
+                    *agent,
                     format!("while preparing txn {}", txn_idx),
                 )?;
             }
@@ -558,51 +563,83 @@ fn safe_merge_from(
     Ok(())
 }
 
+// fn schedule_txns(trace: &TraceFile) -> Result<Vec<usize>, String> {
+//     let n = trace.txns.len();
+//     for (idx, txn) in trace.txns.iter().enumerate() {
+//         for parent in &txn.parents {
+//             if *parent >= n {
+//                 return Err(format!(
+//                     "txn {} has out-of-bounds parent {} for txn_count {}",
+//                     idx, parent, n
+//                 ));
+//             }
+//         }
+//     }
+
+//     let mut done = vec![false; n];
+//     let mut order = Vec::with_capacity(n);
+
+//     while order.len() < n {
+//         let mut progressed = false;
+//         for (idx, txn) in trace.txns.iter().enumerate() {
+//             if done[idx] {
+//                 continue;
+//             }
+//             if txn.parents.iter().all(|p| done[*p]) {
+//                 done[idx] = true;
+//                 order.push(idx);
+//                 progressed = true;
+//             }
+//         }
+
+//         if !progressed {
+//             let blocked = trace
+//                 .txns
+//                 .iter()
+//                 .enumerate()
+//                 .filter(|(idx, _)| !done[*idx])
+//                 .map(|(idx, _)| idx.to_string())
+//                 .collect::<Vec<_>>()
+//                 .join(",");
+//             return Err(format!(
+//                 "unable to schedule transactions due to cyclic or unsatisfied parents; blocked txns: [{}]",
+//                 blocked
+//             ));
+//         }
+//     }
+
+//     Ok(order)
+// }
+
 fn schedule_txns(trace: &TraceFile) -> Result<Vec<usize>, String> {
     let n = trace.txns.len();
+    let mut in_degree = vec![0usize; n];
+    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
+
     for (idx, txn) in trace.txns.iter().enumerate() {
-        for parent in &txn.parents {
-            if *parent >= n {
-                return Err(format!(
-                    "txn {} has out-of-bounds parent {} for txn_count {}",
-                    idx, parent, n
-                ));
-            }
+        for &parent in &txn.parents {
+            in_degree[idx] += 1;
+            dependents[parent].push(idx);
         }
     }
 
-    let mut done = vec![false; n];
+    let mut queue: std::collections::VecDeque<usize> = 
+        (0..n).filter(|&i| in_degree[i] == 0).collect();
     let mut order = Vec::with_capacity(n);
 
-    while order.len() < n {
-        let mut progressed = false;
-        for (idx, txn) in trace.txns.iter().enumerate() {
-            if done[idx] {
-                continue;
+    while let Some(idx) = queue.pop_front() {
+        order.push(idx);
+        for &dep in &dependents[idx] {
+            in_degree[dep] -= 1;
+            if in_degree[dep] == 0 {
+                queue.push_back(dep);
             }
-            if txn.parents.iter().all(|p| done[*p]) {
-                done[idx] = true;
-                order.push(idx);
-                progressed = true;
-            }
-        }
-
-        if !progressed {
-            let blocked = trace
-                .txns
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| !done[*idx])
-                .map(|(idx, _)| idx.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(format!(
-                "unable to schedule transactions due to cyclic or unsatisfied parents; blocked txns: [{}]",
-                blocked
-            ));
         }
     }
 
+    if order.len() != n {
+        return Err("cyclic or unsatisfied parents".to_string());
+    }
     Ok(order)
 }
 

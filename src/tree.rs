@@ -221,7 +221,7 @@ impl Tree {
     }
 
     /* Rebalance the tree all along a path to root */
-    fn rebalance(&mut self, path_to_root: Vec<usize>) {
+    fn rebalance(&mut self, path_to_root: &[usize]) {
         if path_to_root.is_empty() { return; }
 
         // The deepest node in the path 
@@ -396,7 +396,7 @@ impl Tree {
     }
 
     pub fn insert_rec(&mut self, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
-        let mut path = vec![];
+        let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
 
@@ -548,7 +548,7 @@ impl Tree {
             }
         }
         if !rec {
-            self.rebalance(path);
+            self.rebalance(&path);
         }
     }    
 
@@ -571,7 +571,7 @@ impl Tree {
         }
 
         self.free(target);
-        self.rebalance(path[..path.len()-1].to_vec());
+        self.rebalance(&path[..path.len()-1]);
     }
 
     pub fn delete_by_id(&mut self, base: Id, offset: u32) -> Result<(), ()> {

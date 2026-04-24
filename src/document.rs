@@ -243,7 +243,8 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     // assert!(text.chars().count() as u32 <= MAX_VALUE);
 
     // Make pos the end of the document if it is greater than the document size
-    let doc_size = doc.read().chars().count();
+    let doc_size = doc.blocks.tree_size();
+    // let doc_size = doc.read().chars().count();
     let pos = if pos > doc_size { doc_size } else { pos };
 
     let (path, covered) = doc.blocks.find_by_pos(pos);
