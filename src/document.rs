@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::tree::{DelLocation, Tree};
+use crate::tree::{DelLocation, Path, Tree};
 use crate::identifier::{Id, Identifier, IdentifierRef, Range, generate_base, num_insertable};
 use crate::state::State;
 use crate::operation::{OpLog, Operation, OperationType};
@@ -76,7 +76,7 @@ impl Document {
         if self.fresh {
             return self.snapshot.clone();
         }
-        let mut res = String::new();
+        let mut res = String::with_capacity(self.blocks.tree_size());
         for block in self.blocks.inorder_iter() {
             res.push_str(&block.content);
         }
@@ -146,7 +146,7 @@ impl Document {
 
 }
 
-fn extend_block(doc: &mut Document, text:String, block: usize, path: &Vec<usize>, site: u32) -> Operation {
+fn extend_block(doc: &mut Document, text:String, block: usize, path: &Path, site: u32) -> Operation {
     // Check if we can extend the block without clashing with the next block 
     let next = doc.blocks.next(block, path);
     let insert_base = doc.blocks.node_base_id(block).clone();
@@ -198,7 +198,7 @@ fn insert_new_block(doc: &mut Document, id_low: IdentifierRef<'_>, id_high: Iden
     }
 }
 
-fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Vec<usize>, sp: u32, site: u32, id: Option<&Id>) -> Operation {
+fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Path, sp: u32, site: u32, id: Option<&Id>) -> Operation {
     // sp is the split point 
     let base_id = doc.blocks.node_base_id(block).clone();
     let offsets = doc.blocks.node_ranges(block);
@@ -322,7 +322,7 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     doc.blocks.insert_by_id(site, base, offset, text.to_string());
 }
 
-fn delete_and_split(doc: &mut Document, block: usize, _path: &Vec<usize>, left: usize, n: usize) {
+fn delete_and_split(doc: &mut Document, block: usize, _path: &Path, left: usize, n: usize) {
     // Prepare the 2 blocks after the split 
     let base_id = doc.blocks.node_base_id(block).clone();
     let offsets = doc.blocks.node_ranges(block);

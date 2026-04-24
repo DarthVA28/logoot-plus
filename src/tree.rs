@@ -3,6 +3,9 @@ use core::panic;
 use ahash::AHashMap as HashMap;
 use crate::node::Node;
 use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, num_insertable};
+use smallvec::SmallVec;
+
+pub type Path = SmallVec<[usize; 32]>;
 
 #[derive(Clone, Debug)]
 pub struct Tree {
@@ -294,8 +297,8 @@ impl Tree {
 }
 
 impl Tree {
-    pub fn find_by_pos(&self, pos: usize) -> (Vec<usize>, usize) {
-        let mut path_to_root: Vec<usize> = vec![]; 
+    pub fn find_by_pos(&self, pos: usize) -> (Path, usize) {
+        let mut path_to_root = Path::new(); 
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
@@ -323,8 +326,8 @@ impl Tree {
         (path_to_root, covered)
     }
 
-    pub fn find_by_pos_delete(&self, pos: usize) -> (Vec<usize>, usize) {
-        let mut path_to_root: Vec<usize> = vec![];
+    pub fn find_by_pos_delete(&self, pos: usize) -> (Path, usize) {
+        let mut path_to_root = Path::new();
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
@@ -625,10 +628,10 @@ impl Tree {
          Ok(())
     }
 
-    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Vec<usize> {
-        let mut path = vec![];
+    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Path {
+        let mut path = Path::new();
         if self.is_empty() {
-            return Vec::new();
+            return Path::new();
         }
         let node_idi = IdentifierInterval::new(base, offset, offset+1);
         let mut curr = self.root.unwrap();
@@ -662,13 +665,13 @@ impl Tree {
                 _ => panic!("Unexpected relation between B1 and B2 during find_by_id")
             }
         }
-        return vec![];
+        return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Vec<usize> {
-        let mut path = vec![];
+    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Path {
+        let mut path = Path::new();
         if self.is_empty() {
-            return Vec::new();
+            return Path::new();
         }
         let node_idi = IdentifierInterval::new(base.clone(), offset, offset + 1);
         let mut curr = self.root.unwrap();
@@ -683,14 +686,14 @@ impl Tree {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
                     } else {
-                        return vec![];
+                        return Path::new();
                     }
                 }
                 IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
                     if let Some(l) = self.nodes[curr].left {
                         curr = l;
                     } else {
-                        return vec![];
+                        return Path::new();
                     }
                 }
                 IdOrderingRelation::B1EqualsB2 => {
@@ -698,7 +701,7 @@ impl Tree {
                     if self.nodes[curr].base_id == base {
                         return path;
                     }
-                    return vec![];
+                    return Path::new();
                 }
                 IdOrderingRelation::B1InsideB2 => {
                     // Probe falls inside this node's range.
@@ -707,7 +710,7 @@ impl Tree {
                     if self.nodes[curr].base_id == base {
                         return path;
                     }
-                    return vec![];
+                    return Path::new();
                 }
                 _ => panic!("Unexpected relation in find_by_id_exact"),
             }
