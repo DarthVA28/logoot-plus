@@ -33,3 +33,6 @@ version = "0.4.2"
 # The feature was renamed from "js" to "wasm_js" in version 0.3+
 features = ["wasm_js"]
 
+[profile.release]
+codegen-units = 1
+lto = "thin"
