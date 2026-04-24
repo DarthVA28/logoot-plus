@@ -174,9 +174,9 @@ impl IdentifierInterval {
         // self.base.with_offset(self.hi-1)
     }
 
-    fn contains(&self, id: IdentifierRef<'_>) -> bool {
-        self.id_begin() < id && id < self.id_end()
-    }
+    // fn contains(&self, id: IdentifierRef<'_>) -> bool {
+    //     self.id_begin() < id && id < self.id_end()
+    // }
 }
 
 pub enum IdOrderingRelation {
