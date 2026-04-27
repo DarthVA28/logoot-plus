@@ -10,7 +10,7 @@ pub enum OperationType {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Operation { 
     pub op_type: OperationType,
-    pub ids: Vec<(Identifier, Vec<u32>)>,
+    pub ids: Vec<(Identifier, u32, u32)>,
     pub payload: Option<String>,
     pub site: u32, 
     pub clock: u32

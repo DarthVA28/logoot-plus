@@ -1,14 +1,18 @@
 use core::panic;
-use std::collections::HashMap;
+// use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, compare_intervals, num_insertable};
+use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
+use smallvec::SmallVec;
+
+pub type Path = SmallVec<[usize; 32]>;
 
 #[derive(Clone, Debug)]
 pub struct Tree {
     pub nodes: Vec<Node>, 
     pub root: Option<usize>,
     free_list: Vec<usize>,
-    base_to_offsets: HashMap<String, (u32, u32)>
+    base_to_offsets: HashMap<Identifier, (u32, u32)>
 }
 
 pub enum DelLocation {
@@ -96,8 +100,8 @@ impl Tree {
 
     pub fn node_base_offsets(&self, node: usize) -> (u32, u32) { 
         // Get the offsets from the map
-        let base_str = self.nodes[node].base_id.to_string();
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base_str) {
+        let base_id = self.nodes[node].base_id.clone();
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             return (*lo, *hi)
         } else {
             panic!("Base offsets not found for node {}, this should not happen", node);
@@ -110,16 +114,20 @@ impl Tree {
         IdentifierInterval::new(base, offset, offset + self.nodes[node].size as u32)
     }
 
+    pub fn base_id_max_offset(&self, id: &Identifier) -> Option<u32> {
+        self.base_to_offsets.get(id).map(|(_, hi)| *hi)
+    }
+
     pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);
         let added_size = text.chars().count();
         node.size += added_size;
         // update the offsets of the base 
-        let base_str = node.base_id.to_string();
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base_str) {
+        let base_id = node.base_id.clone();
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = hi + added_size as u32;
-            self.base_to_offsets.insert(base_str, (*lo, new_hi));
+            self.base_to_offsets.insert(base_id, (*lo, new_hi));
         } 
         for idx in path_to_root.iter().rev() {
             self.update_node(*idx);
@@ -217,7 +225,7 @@ impl Tree {
     }
 
     /* Rebalance the tree all along a path to root */
-    fn rebalance(&mut self, path_to_root: Vec<usize>) {
+    fn rebalance(&mut self, path_to_root: &[usize]) {
         if path_to_root.is_empty() { return; }
 
         // The deepest node in the path 
@@ -293,8 +301,8 @@ impl Tree {
 }
 
 impl Tree {
-    pub fn find_by_pos(&self, pos: usize) -> (Vec<usize>, usize) {
-        let mut path_to_root: Vec<usize> = vec![]; 
+    pub fn find_by_pos(&self, pos: usize) -> (Path, usize) {
+        let mut path_to_root = Path::new(); 
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
@@ -322,8 +330,8 @@ impl Tree {
         (path_to_root, covered)
     }
 
-    pub fn find_by_pos_delete(&self, pos: usize) -> (Vec<usize>, usize) {
-        let mut path_to_root: Vec<usize> = vec![];
+    pub fn find_by_pos_delete(&self, pos: usize) -> (Path, usize) {
+        let mut path_to_root = Path::new();
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
@@ -358,9 +366,17 @@ impl Tree {
     /// Insert the node by identifier  
     pub fn insert_by_id(&mut self, site: u32, base: Id, offset: u32, content: String) {
         let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
+        let len = content.chars().count() as u32;
         if self.is_empty() {
             self.root = Some(idx);
-            self.base_to_offsets.insert(base.to_string(), (offset, offset + content.chars().count() as u32));
+            if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
+                // Modify the offsets accordingly
+                let new_hi = std::cmp::max(*hi, offset + len);
+                self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
+            } else {
+                self.base_to_offsets.insert(base.clone(), (offset, offset + len));
+            }
+            // self.base_to_offsets.insert(base.clone(), (offset, offset + content.chars().count() as u32));
             return;
         }
         let from = self.root.unwrap();
@@ -368,30 +384,31 @@ impl Tree {
         let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
         self.insert_rec(idx, insert_interval, from, content, site);
         // Lookup in base to offsets map and modify the offsets accordingly
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base.to_string()) {
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
             // Modify the offsets accordingly
             let new_hi = std::cmp::max(*hi, offset + len);
-            self.base_to_offsets.insert(base.to_string(), (*lo, new_hi));
+            self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
         } else {
-            self.base_to_offsets.insert(base.to_string(), (offset, offset + len));
+            self.base_to_offsets.insert(base.clone(), (offset, offset + len));
         }
     }
 
     fn find_split_point(idi_short: &IdentifierInterval, id_long: &Id) -> u32 {
         let mut sp = 0;
         let text_len = idi_short.hi - idi_short.lo;
+        let id_long_slice = id_long.id.as_ref();
         for i in 0..text_len {
-            let id_elem = idi_short.base.with_offset(idi_short.lo + i);
-            if id_elem >= *id_long {
+            let id_elem = IdentifierRef { base: idi_short.base.id.as_ref(), extra: idi_short.lo + i };
+            if id_elem.cmp_slice(id_long_slice) != std::cmp::Ordering::Less {
                 break;
             }
-            sp+=1;
+            sp += 1;
         }
-        return sp;
+        sp
     }
 
     pub fn insert_rec(&mut self, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
-        let mut path = vec![];
+        let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
 
@@ -400,10 +417,18 @@ impl Tree {
             
             // B1 is the block we are adding 
             // B2 is the block we are comparing with
-            let b1 = &mut node_idi;
-            let b2 = &self.node_get_identifier_interval(from);
+            // let b1 = &mut node_idi;
+            // let b2 = &self.node_get_identifier_interval(from);
 
-            match compare_intervals(b1, &b2) {
+            let relation = {
+                let n = &self.nodes[from];
+                compare_intervals_raw(
+                    &node_idi.base, node_idi.lo, node_idi.hi,
+                    &n.base_id, n.offset, n.offset + n.size as u32,
+                )
+            }; // shared borrow of self.nodes[from] released here
+
+            match relation {
                 IdOrderingRelation::B1AfterB2 => {
                     let from_node = &mut self.nodes[from];
                     if let Some(r) = from_node.right {
@@ -462,7 +487,10 @@ impl Tree {
                     // We should also check if we are at upper edge of offsets for this block
                     // As a rule, we will not reinsert IDs which have already been inserted & deleted 
                     // check base to offsets map 
-                    if let Some((_, hi)) = self.base_to_offsets.get(&b2.base.to_string()) {
+                    let b2_base = {
+                        self.nodes[from].base_id.clone() // one clone, only in this rare branch
+                    };
+                    if let Some((_, hi)) = self.base_to_offsets.get(&b2_base) {
                         if node_idi.lo < *hi {
                             let from_node = &mut self.nodes[from];
                             if let Some(r) = from_node.right {
@@ -491,7 +519,9 @@ impl Tree {
                         let r_base = self.node_base_id(r);
                         let r_offset = self.node_ranges(r).0;
                         let len = content.chars().count() as u32;
-                        let n_insertable= num_insertable(&node_idi.base.with_offset(node_idi.lo), &r_base.with_offset(r_offset), len);
+                        let id_insert = IdentifierRef::new(&node_idi.base, node_idi.lo);
+                        let id_next = IdentifierRef::new(r_base, r_offset);
+                        let n_insertable = num_insertable(id_insert, id_next, len);
                         let from_node = &mut self.nodes[from];
                         if n_insertable < len {
                             // FIXME: just go right, don't bother splitting for now
@@ -514,9 +544,13 @@ impl Tree {
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
-                    // println!("Covered...");
                     // Split the incoming node 
-                    let sp = Self::find_split_point(b1, &b2.base);
+                    let b1 = &mut node_idi;
+                    let sp = {
+                        let b2_base = &self.nodes[from].base_id;
+                        Self::find_split_point(&b1, b2_base)
+                    }; 
+
                     let left_content: String = content.chars().take(sp as usize).collect();
                     let right_content: String = content.chars().skip(sp as usize).collect();
 
@@ -541,7 +575,7 @@ impl Tree {
             }
         }
         if !rec {
-            self.rebalance(path);
+            self.rebalance(&path);
         }
     }    
 
@@ -564,7 +598,7 @@ impl Tree {
         }
 
         self.free(target);
-        self.rebalance(path[..path.len()-1].to_vec());
+        self.rebalance(&path[..path.len()-1]);
     }
 
     pub fn delete_by_id(&mut self, base: Id, offset: u32) -> Result<(), ()> {
@@ -621,10 +655,10 @@ impl Tree {
          Ok(())
     }
 
-    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Vec<usize> {
-        let mut path = vec![];
+    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Path {
+        let mut path = Path::new();
         if self.is_empty() {
-            return Vec::new();
+            return Path::new();
         }
         let node_idi = IdentifierInterval::new(base, offset, offset+1);
         let mut curr = self.root.unwrap();
@@ -658,13 +692,13 @@ impl Tree {
                 _ => panic!("Unexpected relation between B1 and B2 during find_by_id")
             }
         }
-        return vec![];
+        return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Vec<usize> {
-        let mut path = vec![];
+    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Path {
+        let mut path = Path::new();
         if self.is_empty() {
-            return Vec::new();
+            return Path::new();
         }
         let node_idi = IdentifierInterval::new(base.clone(), offset, offset + 1);
         let mut curr = self.root.unwrap();
@@ -679,14 +713,14 @@ impl Tree {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
                     } else {
-                        return vec![];
+                        return Path::new();
                     }
                 }
                 IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
                     if let Some(l) = self.nodes[curr].left {
                         curr = l;
                     } else {
-                        return vec![];
+                        return Path::new();
                     }
                 }
                 IdOrderingRelation::B1EqualsB2 => {
@@ -694,7 +728,7 @@ impl Tree {
                     if self.nodes[curr].base_id == base {
                         return path;
                     }
-                    return vec![];
+                    return Path::new();
                 }
                 IdOrderingRelation::B1InsideB2 => {
                     // Probe falls inside this node's range.
@@ -703,7 +737,7 @@ impl Tree {
                     if self.nodes[curr].base_id == base {
                         return path;
                     }
-                    return vec![];
+                    return Path::new();
                 }
                 _ => panic!("Unexpected relation in find_by_id_exact"),
             }
@@ -715,7 +749,7 @@ impl Tree {
 
 pub struct InOrderIter<'a> {
     tree: &'a Tree,
-    stack: Vec<usize>,
+    stack: SmallVec<[usize; 32]>,
     current: Option<usize>,
 }
 
@@ -723,7 +757,7 @@ impl<'a> InOrderIter<'a> {
     pub fn new(tree: &'a Tree) -> Self {
         InOrderIter {
             tree,
-            stack: Vec::new(),
+            stack: SmallVec::new(),
             current: tree.root,
         }
     }
@@ -832,7 +866,9 @@ impl Tree {
             let curr_id = node.base_id.clone();
             let (lo, hi) = (node.offset, node.offset + node.size as u32);
             if let Some(prev) = prev_id {
-                if curr_id.with_offset(lo) <= prev.with_offset(prev_offsets.unwrap().1-1) {
+                let curr_lo = IdentifierRef::new(&curr_id, lo);
+                let prev_hi = IdentifierRef::new(&prev, prev_offsets.unwrap().1-1);
+                if curr_lo <= prev_hi {
                     eprintln!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
                     return false;
                 }
