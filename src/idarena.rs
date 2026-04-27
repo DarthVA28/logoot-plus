@@ -349,21 +349,56 @@ impl IdArena {
 
     // ── find_split_point ─────────────────────────────────────
 
+    // pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: Identifier) -> u32 {
+    //     let long_slice = self.get_slice(id_long);
+    //     let text_len = idi_short.hi - idi_short.lo;
+    //     let short_slice = self.get_slice(idi_short.base);
+    //     let mut sp = 0;
+    //     for i in 0..text_len {
+    //         let cmp = short_slice.iter().chain(std::iter::once(&(idi_short.lo + i)))
+    //             .cmp(long_slice.iter());
+    //         if cmp != Ordering::Less { break; }
+    //         sp += 1;
+    //     }
+    //     sp
+    // }
+
     pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: Identifier) -> u32 {
-        let long_slice = self.get_slice(id_long);
+        if id_long.is_empty() { return 0; }
+
         let text_len = idi_short.hi - idi_short.lo;
+        if text_len == 0 { return 0; }
+
+        let long_slice = self.get_slice(id_long);
         let short_slice = self.get_slice(idi_short.base);
-        let mut sp = 0;
-        for i in 0..text_len {
-            // Compare short_slice ++ [lo + i] against long_slice
-            // let ref_i = IdentifierRef::new(idi_short.base, idi_short.lo + i);
-            // Inline the comparison to avoid function call overhead in the loop
-            let cmp = short_slice.iter().chain(std::iter::once(&(idi_short.lo + i)))
-                .cmp(long_slice.iter());
-            if cmp != Ordering::Less { break; }
-            sp += 1;
+        let min_len = short_slice.len().min(long_slice.len());
+
+        // Compare the shared prefix once, outside the binary search.
+        match short_slice[..min_len].cmp(&long_slice[..min_len]) {
+            Ordering::Less => {
+                return text_len;
+            }
+            Ordering::Greater => {
+                return 0;
+            }
+            Ordering::Equal => {}
         }
-        sp
+
+        // Prefixes match. Now ordering depends on what comes after position min_len.
+        if short_slice.len() < long_slice.len() {
+            let pivot = long_slice[min_len];
+            let extras_below = if long_slice.len() > min_len + 1 {
+                pivot.saturating_add(1).saturating_sub(idi_short.lo)
+            } else {
+                // ref < long whenever extra < pivot
+                pivot.saturating_sub(idi_short.lo)
+            };
+            return extras_below.min(text_len);
+        } else if short_slice.len() == long_slice.len() {
+            return 0;
+        } else {
+            return 0;
+        }
     }
 
     // ── Path access (for serialisation / debug) ──────────────
