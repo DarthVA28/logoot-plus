@@ -6,7 +6,7 @@ pub mod wasm;
 pub mod document;
 pub mod network;
 pub mod trace_bench;
-pub mod idtrie;
+pub mod idarena;
 
 use document::Document;
 use network::Network;

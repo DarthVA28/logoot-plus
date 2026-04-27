@@ -41,7 +41,7 @@ const EMPTY_OFFSET: u32 = u32::MAX;
 /// the same path (interning ensures uniqueness), so equality and
 /// hashing are O(1).
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaId {
+pub struct Identifier {
     /// Byte offset into `IdArena::data`.  EMPTY_OFFSET = empty path.
     offset: u32,
     /// Number of `u32` components in this path.
@@ -49,8 +49,8 @@ pub struct ArenaId {
     // Padding: 2 bytes free here due to alignment.
 }
 
-impl ArenaId {
-    pub const EMPTY: ArenaId = ArenaId { offset: EMPTY_OFFSET, len: 0 };
+impl Identifier {
+    pub const EMPTY: Identifier = Identifier { offset: EMPTY_OFFSET, len: 0 };
 
     #[inline(always)]
     pub fn is_empty(self) -> bool { self.offset == EMPTY_OFFSET }
@@ -59,13 +59,13 @@ impl ArenaId {
     pub fn depth(self) -> u16 { self.len }
 }
 
-impl PartialEq for ArenaId {
+impl PartialEq for Identifier {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool { self.offset == other.offset }
 }
-impl Eq for ArenaId {}
+impl Eq for Identifier {}
 
-impl std::hash::Hash for ArenaId {
+impl std::hash::Hash for Identifier {
     #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.offset.hash(state); }
 }
@@ -75,31 +75,31 @@ impl std::hash::Hash for ArenaId {
 /// An identifier extended by one extra component (the offset into an
 /// `IdentifierInterval`).  Replaces the old `IdentifierRef`.
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaIdRef {
-    pub base: ArenaId,
+pub struct IdentifierRef {
+    pub base: Identifier,
     pub extra: u32,
 }
 
-impl ArenaIdRef {
+impl IdentifierRef {
     #[inline(always)]
-    pub fn new(base: ArenaId, extra: u32) -> Self { ArenaIdRef { base, extra } }
-    pub fn doc_start() -> Self { ArenaIdRef { base: ArenaId::EMPTY, extra: MIN_VALUE } }
-    pub fn doc_end()   -> Self { ArenaIdRef { base: ArenaId::EMPTY, extra: MAX_VALUE } }
+    pub fn new(base: Identifier, extra: u32) -> Self { IdentifierRef { base, extra } }
+    pub fn doc_start() -> Self { IdentifierRef { base: Identifier::EMPTY, extra: MIN_VALUE } }
+    pub fn doc_end()   -> Self { IdentifierRef { base: Identifier::EMPTY, extra: MAX_VALUE } }
 }
 
 // ───────────────────────── IdentifierInterval ────────────────
 
 #[derive(Clone, Copy, Debug)]
 pub struct IdentifierInterval {
-    pub base: ArenaId,
+    pub base: Identifier,
     pub lo: u32,
     pub hi: u32,
 }
 
 impl IdentifierInterval {
-    pub fn new(base: ArenaId, lo: u32, hi: u32) -> Self { IdentifierInterval { base, lo, hi } }
-    pub fn id_begin(&self) -> ArenaIdRef { ArenaIdRef::new(self.base, self.lo) }
-    pub fn id_end(&self)   -> ArenaIdRef { ArenaIdRef::new(self.base, self.hi - 1) }
+    pub fn new(base: Identifier, lo: u32, hi: u32) -> Self { IdentifierInterval { base, lo, hi } }
+    pub fn id_begin(&self) -> IdentifierRef { IdentifierRef::new(self.base, self.lo) }
+    pub fn id_end(&self)   -> IdentifierRef { IdentifierRef::new(self.base, self.hi - 1) }
 }
 
 // ───────────────────────── IdOrderingRelation ────────────────
@@ -149,8 +149,8 @@ impl IdArena {
     /// Intern a path, returning a deduplicated `ArenaId`.
     /// If this exact path was previously interned, returns the same
     /// `ArenaId` (same offset).
-    pub fn intern(&mut self, path: &[u32]) -> ArenaId {
-        if path.is_empty() { return ArenaId::EMPTY; }
+    pub fn intern(&mut self, path: &[u32]) -> Identifier {
+        if path.is_empty() { return Identifier::EMPTY; }
 
         let hash = self.hash_slice(path);
         let len = path.len() as u16;
@@ -161,7 +161,7 @@ impl IdArena {
                 if cand_len == len {
                     let stored = &self.data[offset as usize..(offset as usize + len as usize)];
                     if stored == path {
-                        return ArenaId { offset, len };
+                        return Identifier { offset, len };
                     }
                 }
             }
@@ -171,7 +171,7 @@ impl IdArena {
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(path);
         self.dedup.entry(hash).or_default().push((offset, len));
-        ArenaId { offset, len }
+        Identifier { offset, len }
     }
 
     #[inline]
@@ -187,7 +187,7 @@ impl IdArena {
     /// Get the path components for an `ArenaId`.
     /// This is an O(1) slice lookup — no allocation, no copying.
     #[inline(always)]
-    pub fn get_slice(&self, id: ArenaId) -> &[u32] {
+    pub fn get_slice(&self, id: Identifier) -> &[u32] {
         if id.is_empty() { return &[]; }
         &self.data[id.offset as usize..(id.offset as usize + id.len as usize)]
     }
@@ -197,7 +197,7 @@ impl IdArena {
     /// Compare two identifiers lexicographically.
     /// O(1) if same id, O(depth) sequential scan otherwise.
     #[inline]
-    pub fn compare_ids(&self, a: ArenaId, b: ArenaId) -> Ordering {
+    pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
         if a.offset == b.offset { return Ordering::Equal; }
         self.get_slice(a).cmp(self.get_slice(b))
     }
@@ -208,7 +208,7 @@ impl IdArena {
     ///
     /// Optimised to avoid iterator chaining in the hot path.
     #[inline]
-    pub fn compare_refs(&self, a: ArenaIdRef, b: ArenaIdRef) -> Ordering {
+    pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
         // Fast path: same base → just compare extras
         if a.base.offset == b.base.offset {
             return a.extra.cmp(&b.extra);
@@ -267,8 +267,8 @@ impl IdArena {
     #[inline(always)]
     pub fn compare_intervals_raw(
         &self,
-        b1_base: ArenaId, b1_lo: u32, b1_hi: u32,
-        b2_base: ArenaId, b2_lo: u32, b2_hi: u32,
+        b1_base: Identifier, b1_lo: u32, b1_hi: u32,
+        b2_base: Identifier, b2_lo: u32, b2_hi: u32,
     ) -> IdOrderingRelation {
         // Fast path: same base → pure offset arithmetic, no comparison needed
         if b1_base == b2_base {
@@ -292,13 +292,13 @@ impl IdArena {
         // Different bases: compare begin points first (1 comparison),
         // then conditionally check containment (1 more comparison).
         // Total: at most 2 compare_refs calls.
-        let b1_begin = ArenaIdRef::new(b1_base, b1_lo);
-        let b2_begin = ArenaIdRef::new(b2_base, b2_lo);
+        let b1_begin = IdentifierRef::new(b1_base, b1_lo);
+        let b2_begin = IdentifierRef::new(b2_base, b2_lo);
 
         match self.compare_refs(b1_begin, b2_begin) {
             Ordering::Less => {
                 // b1 starts before b2.  Check if b2_begin < b1_end (containment).
-                let b1_end = ArenaIdRef::new(b1_base, b1_hi - 1);
+                let b1_end = IdentifierRef::new(b1_base, b1_hi - 1);
                 if self.compare_refs(b2_begin, b1_end) == Ordering::Less {
                     IdOrderingRelation::B2InsideB1
                 } else {
@@ -307,7 +307,7 @@ impl IdArena {
             }
             Ordering::Greater => {
                 // b2 starts before b1.  Check if b1_begin < b2_end (containment).
-                let b2_end = ArenaIdRef::new(b2_base, b2_hi - 1);
+                let b2_end = IdentifierRef::new(b2_base, b2_hi - 1);
                 if self.compare_refs(b1_begin, b2_end) == Ordering::Less {
                     IdOrderingRelation::B1InsideB2
                 } else {
@@ -329,7 +329,7 @@ impl IdArena {
 
     // ── num_insertable ───────────────────────────────────────
 
-    pub fn num_insertable(&self, id_insert: ArenaIdRef, id_next: ArenaIdRef, length: u32) -> u32 {
+    pub fn num_insertable(&self, id_insert: IdentifierRef, id_next: IdentifierRef, length: u32) -> u32 {
         let insert_slice = self.get_slice(id_insert.base);
         let next_slice = self.get_slice(id_next.base);
         let l = insert_slice.len();
@@ -349,14 +349,14 @@ impl IdArena {
 
     // ── find_split_point ─────────────────────────────────────
 
-    pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: ArenaId) -> u32 {
+    pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: Identifier) -> u32 {
         let long_slice = self.get_slice(id_long);
         let text_len = idi_short.hi - idi_short.lo;
         let short_slice = self.get_slice(idi_short.base);
         let mut sp = 0;
         for i in 0..text_len {
             // Compare short_slice ++ [lo + i] against long_slice
-            let ref_i = ArenaIdRef::new(idi_short.base, idi_short.lo + i);
+            let ref_i = IdentifierRef::new(idi_short.base, idi_short.lo + i);
             // Inline the comparison to avoid function call overhead in the loop
             let cmp = short_slice.iter().chain(std::iter::once(&(idi_short.lo + i)))
                 .cmp(long_slice.iter());
@@ -370,16 +370,16 @@ impl IdArena {
 
     /// Get the full path as a slice.  Zero allocation.
     #[inline(always)]
-    pub fn get_path(&self, id: ArenaId) -> &[u32] {
+    pub fn get_path(&self, id: Identifier) -> &[u32] {
         self.get_slice(id)
     }
 
     /// Get the full path as an owned Vec (for serialisation).
-    pub fn get_path_owned(&self, id: ArenaId) -> Vec<u32> {
+    pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
         self.get_slice(id).to_vec()
     }
 
-    pub fn to_string(&self, id: ArenaId) -> String {
+    pub fn to_string(&self, id: Identifier) -> String {
         self.get_slice(id).iter().map(|x| x.to_string()).collect::<Vec<_>>().join(".")
     }
 
@@ -399,10 +399,10 @@ use rand::RngExt;
 
 pub fn generate_base(
     arena: &mut IdArena,
-    id_low: ArenaIdRef,
-    id_high: ArenaIdRef,
+    id_low: IdentifierRef,
+    id_high: IdentifierRef,
     state: &mut State,
-) -> ArenaId {
+) -> Identifier {
     let low_slice = arena.get_slice(id_low.base);
     let high_slice = arena.get_slice(id_high.base);
 
@@ -452,7 +452,7 @@ mod tests {
         let mut arena = IdArena::new();
         let id = arena.intern(&[10, 20, 30]);
         assert_eq!(arena.get_path(id), &[10, 20, 30]);
-        assert_eq!(arena.get_path(ArenaId::EMPTY), &[] as &[u32]);
+        assert_eq!(arena.get_path(Identifier::EMPTY), &[] as &[u32]);
     }
 
     #[test]
@@ -473,8 +473,8 @@ mod tests {
     fn test_compare_refs_same_base() {
         let mut arena = IdArena::new();
         let base = arena.intern(&[5, 12, 3]);
-        let a = ArenaIdRef::new(base, 99);
-        let b = ArenaIdRef::new(base, 120);
+        let a = IdentifierRef::new(base, 99);
+        let b = IdentifierRef::new(base, 120);
         assert_eq!(arena.compare_refs(a, b), Ordering::Less);
     }
 
@@ -484,9 +484,9 @@ mod tests {
         let ba = arena.intern(&[5, 12]);
         let bb = arena.intern(&[5, 12, 3]);
         // [5,12,3] vs [5,12,3,99] → Less (prefix)
-        assert_eq!(arena.compare_refs(ArenaIdRef::new(ba, 3), ArenaIdRef::new(bb, 99)), Ordering::Less);
+        assert_eq!(arena.compare_refs(IdentifierRef::new(ba, 3), IdentifierRef::new(bb, 99)), Ordering::Less);
         // [5,12,4] vs [5,12,3,99] → Greater (4 > 3 at position 2)
-        assert_eq!(arena.compare_refs(ArenaIdRef::new(ba, 4), ArenaIdRef::new(bb, 99)), Ordering::Greater);
+        assert_eq!(arena.compare_refs(IdentifierRef::new(ba, 4), IdentifierRef::new(bb, 99)), Ordering::Greater);
     }
 
     #[test]
@@ -495,12 +495,12 @@ mod tests {
         let base = arena.intern(&[5, 10]);
         // [0] vs [5,10,99]
         assert_eq!(
-            arena.compare_refs(ArenaIdRef::doc_start(), ArenaIdRef::new(base, 99)),
+            arena.compare_refs(IdentifierRef::doc_start(), IdentifierRef::new(base, 99)),
             Ordering::Less
         );
         // [100000] vs [5,10,99]
         assert_eq!(
-            arena.compare_refs(ArenaIdRef::doc_end(), ArenaIdRef::new(base, 99)),
+            arena.compare_refs(IdentifierRef::doc_end(), IdentifierRef::new(base, 99)),
             Ordering::Greater
         );
     }
@@ -537,8 +537,8 @@ mod tests {
     fn test_num_insertable() {
         let mut arena = IdArena::new();
         let base = arena.intern(&[5, 10]);
-        let ins = ArenaIdRef::new(base, 3);
-        let nxt = ArenaIdRef::new(base, 7);
+        let ins = IdentifierRef::new(base, 3);
+        let nxt = IdentifierRef::new(base, 7);
         assert_eq!(arena.num_insertable(ins, nxt, 100), 5); // 7+1-3
     }
 
@@ -572,14 +572,14 @@ mod tests {
         let extras = [0u32, 1, 5, 100];
 
         let mut arena = IdArena::new();
-        let arena_ids: Vec<ArenaId> = paths.iter().map(|p| arena.intern(p)).collect();
+        let arena_ids: Vec<Identifier> = paths.iter().map(|p| arena.intern(p)).collect();
 
         for (i, pa) in paths.iter().enumerate() {
             for &ea in &extras {
                 for (j, pb) in paths.iter().enumerate() {
                     for &eb in &extras {
-                        let ra = ArenaIdRef::new(arena_ids[i], ea);
-                        let rb = ArenaIdRef::new(arena_ids[j], eb);
+                        let ra = IdentifierRef::new(arena_ids[i], ea);
+                        let rb = IdentifierRef::new(arena_ids[j], eb);
                         let mut sa = pa.clone(); sa.push(ea);
                         let mut sb = pb.clone(); sb.push(eb);
                         let expected = sa.cmp(&sb);

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::idtrie::{IdArena, Range, ArenaId, ArenaIdRef, generate_base};
+use crate::idarena::{IdArena, Range, Identifier, IdentifierRef, generate_base};
 use crate::tree::{DelLocation, Path, Tree};
 use crate::state::State;
 use crate::operation::{OpLog, Operation, OperationType, WireOperation};
@@ -10,7 +10,7 @@ pub struct Document {
     pub blocks: Tree,
     pub id_trie: IdArena,
     state: State,
-    used_ranges_for_id: HashMap<ArenaId, Range>,
+    used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
     pub oplog: OpLog,
     debug: bool,
@@ -168,12 +168,12 @@ fn extend_block(doc: &mut Document, text:String, block: usize, path: &Path, site
         let next_base = doc.blocks.node_base_id(nxt_block).clone();
         let next_offsets: (u32, u32) = doc.blocks.node_ranges(nxt_block);
         // Get final IDs
-        let id_insert = ArenaIdRef::new(insert_base, insert_offsets.1);
-        let id_next = ArenaIdRef::new(next_base, next_offsets.0);
+        let id_insert = IdentifierRef::new(insert_base, insert_offsets.1);
+        let id_next = IdentifierRef::new(next_base, next_offsets.0);
         let n = doc.id_trie.num_insertable(id_insert, id_next, text_len);
         if n < text_len {
-            let id_low = ArenaIdRef::new(insert_base, insert_offsets.1-1);
-            let id_high = ArenaIdRef::new(next_base, next_offsets.0);
+            let id_low = IdentifierRef::new(insert_base, insert_offsets.1-1);
+            let id_high = IdentifierRef::new(next_base, next_offsets.0);
             return insert_new_block(doc, id_low, id_high, text, site, None);   
         }
     }
@@ -189,7 +189,7 @@ fn extend_block(doc: &mut Document, text:String, block: usize, path: &Path, site
     }
 }
 
-fn insert_new_block(doc: &mut Document, id_low: ArenaIdRef, id_high: ArenaIdRef, text: String, site: u32, id: Option<ArenaId>) -> Operation {
+fn insert_new_block(doc: &mut Document, id_low: IdentifierRef, id_high: IdentifierRef, text: String, site: u32, id: Option<Identifier>) -> Operation {
     let base = {
         if id.is_none() { generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state) }
         else { id.unwrap().clone() }
@@ -205,7 +205,7 @@ fn insert_new_block(doc: &mut Document, id_low: ArenaIdRef, id_high: ArenaIdRef,
     }
 }
 
-fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Path, sp: u32, site: u32, id: Option<ArenaId>) -> Operation {
+fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Path, sp: u32, site: u32, id: Option<Identifier>) -> Operation {
     // sp is the split point 
     let base_id = doc.blocks.node_base_id(block).clone();
     let offsets = doc.blocks.node_ranges(block);
@@ -225,8 +225,8 @@ fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path:
     doc.blocks.insert_by_id(owner, &doc.id_trie, base_id.clone(), offsets.0 + sp, rcontent.clone());
 
     // Insert the new block in between
-    let id_low = ArenaIdRef::new(base_id, offsets.0 + sp - 1);
-    let id_high = ArenaIdRef::new(base_id, offsets.0 + sp);
+    let id_low = IdentifierRef::new(base_id, offsets.0 + sp - 1);
+    let id_high = IdentifierRef::new(base_id, offsets.0 + sp);
 
     let new_id = if let Some(id) = id {
         id.clone()
@@ -254,7 +254,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
 
     let (path, covered) = doc.blocks.find_by_pos(pos);
     if path.is_empty() {
-        return insert_new_block(doc, ArenaIdRef::doc_start(), ArenaIdRef::doc_end(), text, doc.state.replica, None);
+        return insert_new_block(doc, IdentifierRef::doc_start(), IdentifierRef::doc_end(), text, doc.state.replica, None);
     }
 
     let block = path.last().expect("Path should not be empty");
@@ -276,17 +276,17 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
        }
 
        // It cannot be extended, insert one new block after this block
-       let id_low=  ArenaIdRef::new(block_base, block_ranges.1-1);
+       let id_low=  IdentifierRef::new(block_base, block_ranges.1-1);
     //    let id_low = block_base.with_offset(block_ranges.1 - 1);
        let next = doc.blocks.next(*block, &path);
        let next_base;
        let id_high = if next.is_none() {
-            ArenaIdRef::doc_end()
+            IdentifierRef::doc_end()
         } else {
             let next_block = next.unwrap();
             next_base = doc.blocks.node_base_id(next_block).clone();
             let next_ranges = doc.blocks.node_ranges(next_block);
-            let next_base_with_offset = ArenaIdRef::new(next_base, next_ranges.0);
+            let next_base_with_offset = IdentifierRef::new(next_base, next_ranges.0);
             next_base_with_offset
         };
         return insert_new_block(doc, id_low, id_high, text, doc.state.replica, None);
@@ -297,14 +297,14 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         let prev_block = doc.blocks.prev(*block, &path);
         let prev_base;
         let id_low = if prev_block.is_none() {
-            ArenaIdRef::doc_start()
+            IdentifierRef::doc_start()
         } else {
             let prev_block = prev_block.unwrap();
             prev_base = doc.blocks.node_base_id(prev_block).clone();
             let prev_ranges = doc.blocks.node_ranges(prev_block);
-            ArenaIdRef::new(prev_base, prev_ranges.1 - 1)
+            IdentifierRef::new(prev_base, prev_ranges.1 - 1)
         };
-        let id_high = ArenaIdRef::new(block_base, block_ranges.0);
+        let id_high = IdentifierRef::new(block_base, block_ranges.0);
         return insert_new_block(doc, id_low, id_high, text, doc.state.replica, None);
     }
 
@@ -357,7 +357,7 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     // Find the index of from 
 
     let mut num_delete = to - from;
-    let mut del_info: Vec<(ArenaId, u32, u32)> = vec![];
+    let mut del_info: Vec<(Identifier, u32, u32)> = vec![];
 
     let curr = from;
 
@@ -368,7 +368,7 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
         }
 
         let block = *path.last().unwrap();
-        let mut indices : Vec<(ArenaId, u32, u32)> = vec![];
+        let mut indices : Vec<(Identifier, u32, u32)> = vec![];
         let offset = covered;
         let block_size = doc.blocks.node_size(Some(block));
         

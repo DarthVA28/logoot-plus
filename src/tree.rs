@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use ahash::AHashMap as HashMap;
 use crate::node::Node;
 // use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
-use crate::idtrie::{ArenaId, ArenaIdRef, IdentifierInterval, IdOrderingRelation, IdArena};
+use crate::idarena::{Identifier, IdentifierRef, IdentifierInterval, IdOrderingRelation, IdArena};
 use smallvec::SmallVec;
 
 pub type Path = SmallVec<[usize; 32]>;
@@ -14,7 +14,7 @@ pub struct Tree {
     pub nodes: Vec<Node>, 
     pub root: Option<usize>,
     free_list: Vec<usize>,
-    base_to_offsets: HashMap<ArenaId, (u32, u32)>
+    base_to_offsets: HashMap<Identifier, (u32, u32)>
 }
 
 pub enum DelLocation {
@@ -89,7 +89,7 @@ impl Tree {
         self.nodes[node].creator
     }
 
-    pub fn node_base_id(&self, node: usize) -> ArenaId { 
+    pub fn node_base_id(&self, node: usize) -> Identifier { 
         self.nodes[node].base_id
     }
 
@@ -116,7 +116,7 @@ impl Tree {
         IdentifierInterval::new(base, offset, offset + self.nodes[node].size as u32)
     }
 
-    pub fn base_id_max_offset(&self, id: ArenaId) -> Option<u32> {
+    pub fn base_id_max_offset(&self, id: Identifier) -> Option<u32> {
         self.base_to_offsets.get(&id).map(|(_, hi)| *hi)
     }
 
@@ -366,7 +366,7 @@ impl Tree {
     }
 
     /// Insert the node by identifier  
-    pub fn insert_by_id(&mut self, site: u32, id_trie: &IdArena, base: ArenaId, offset: u32, content: String) {
+    pub fn insert_by_id(&mut self, site: u32, id_arena: &IdArena, base: Identifier, offset: u32, content: String) {
         let idx = self.alloca(Node::new(content.clone(), base, offset, site));
         let len = content.chars().count() as u32;
         if self.is_empty() {
@@ -384,7 +384,7 @@ impl Tree {
         let from = self.root.unwrap();
         let len = content.chars().count() as u32;
         let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
-        self.insert_rec(id_trie, idx, insert_interval, from, content, site);
+        self.insert_rec(id_arena, idx, insert_interval, from, content, site);
         // Lookup in base to offsets map and modify the offsets accordingly
         if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
             // Modify the offsets accordingly
@@ -395,7 +395,7 @@ impl Tree {
         }
     }
 
-    pub fn insert_rec(&mut self, id_trie: &IdArena, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
+    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
@@ -410,7 +410,7 @@ impl Tree {
 
             let relation = {
                 let n = &self.nodes[from];
-                id_trie.compare_intervals_raw(
+                id_arena.compare_intervals_raw(
                     node_idi.base, node_idi.lo, node_idi.hi,
                     n.base_id, n.offset, n.offset + n.size as u32,
                 )
@@ -439,7 +439,7 @@ impl Tree {
                     // Split the node and insert in the middle
                     // Find the split point 
                     let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content) = {
-                        let sp = id_trie.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
+                        let sp = id_arena.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
                         let from_content = &from_node.content;
                         // Find the byte position of the character offset 'sp'
@@ -506,9 +506,9 @@ impl Tree {
                         let r_base = self.node_base_id(r);
                         let r_offset = self.node_ranges(r).0;
                         let len = content.chars().count() as u32;
-                        let id_insert = ArenaIdRef::new(node_idi.base, node_idi.lo);
-                        let id_next = ArenaIdRef::new(r_base, r_offset);
-                        let n_insertable = id_trie.num_insertable(id_insert, id_next, len);
+                        let id_insert = IdentifierRef::new(node_idi.base, node_idi.lo);
+                        let id_next = IdentifierRef::new(r_base, r_offset);
+                        let n_insertable = id_arena.num_insertable(id_insert, id_next, len);
                         let from_node = &mut self.nodes[from];
                         if n_insertable < len {
                             // FIXME: just go right, don't bother splitting for now
@@ -535,15 +535,15 @@ impl Tree {
                     let b1 = &mut node_idi;
                     let sp = {
                         let b2_base = self.nodes[from].base_id;
-                        id_trie.find_split_point(&b1, b2_base)
+                        id_arena.find_split_point(&b1, b2_base)
                     }; 
 
                     let left_content: String = content.chars().take(sp as usize).collect();
                     let right_content: String = content.chars().skip(sp as usize).collect();
 
                     // Insert both recursively 
-                    self.insert_by_id(site, id_trie, b1.base, b1.lo, left_content);
-                    self.insert_by_id(site, id_trie, b1.base, b1.lo + sp, right_content);
+                    self.insert_by_id(site, id_arena, b1.base, b1.lo, left_content);
+                    self.insert_by_id(site, id_arena, b1.base, b1.lo + sp, right_content);
 
                     self.free(node);
 
@@ -588,12 +588,12 @@ impl Tree {
         self.rebalance(&path[..path.len()-1]);
     }
 
-    pub fn delete_by_id(&mut self, id_trie: &IdArena, base: ArenaId, offset: u32) -> Result<(), ()> {
+    pub fn delete_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Result<(), ()> {
         // let mut path: Vec<usize> = vec![];
         if self.is_empty() {
             return Err(())
         }
-        let path= self.find_by_id(id_trie, base, offset);
+        let path= self.find_by_id(id_arena, base, offset);
         if path.is_empty() {
             return Err(());
         } 
@@ -642,7 +642,7 @@ impl Tree {
          Ok(())
     }
 
-    pub fn find_by_id(&mut self, id_trie: &IdArena, base: ArenaId, offset: u32) -> Path {
+    pub fn find_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -655,7 +655,7 @@ impl Tree {
             let b1 = &node_idi;
             let b2 = &self.node_get_identifier_interval(curr);
 
-            match id_trie.compare_intervals(b1, &b2) {
+            match id_arena.compare_intervals(b1, &b2) {
                 IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
                     let from_node = &mut self.nodes[curr];
                     if let Some(r) = from_node.right {
@@ -682,7 +682,7 @@ impl Tree {
         return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, id_trie: &IdArena, base: ArenaId, offset: u32) -> Path {
+    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -695,7 +695,7 @@ impl Tree {
             let b1 = &node_idi;
             let b2 = &self.node_get_identifier_interval(curr);
 
-            match id_trie.compare_intervals(b1, &b2) {
+            match id_arena.compare_intervals(b1, &b2) {
                 IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
@@ -846,16 +846,16 @@ impl Tree {
 
     /* Function to check whether all the keys in the tree are sorted or not */
     /// collect all the keys inorder and check if they are sorted
-    pub fn check_tree(&self, id_trie: &IdArena) -> bool {
-        let mut prev_id: Option<ArenaId> = None;
+    pub fn check_tree(&self, id_arena: &IdArena) -> bool {
+        let mut prev_id: Option<Identifier> = None;
         let mut prev_offsets: Option<(u32, u32)> = None;
         for node in self.inorder_iter() {
             let curr_id = node.base_id.clone();
             let (lo, hi) = (node.offset, node.offset + node.size as u32);
             if let Some(prev) = prev_id {
-                let curr_lo = ArenaIdRef::new(curr_id, lo);
-                let prev_hi = ArenaIdRef::new(prev, prev_offsets.unwrap().1-1);
-                if id_trie.compare_refs(curr_lo, prev_hi) != Ordering::Greater {
+                let curr_lo = IdentifierRef::new(curr_id, lo);
+                let prev_hi = IdentifierRef::new(prev, prev_offsets.unwrap().1-1);
+                if id_arena.compare_refs(curr_lo, prev_hi) != Ordering::Greater {
                     eprintln!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
                     return false;
                 }

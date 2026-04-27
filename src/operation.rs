@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 
-use crate::idtrie::{IdArena, ArenaId};
+use crate::idarena::{IdArena, Identifier};
 // use crate::identifier::Identifier;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12,7 +12,7 @@ pub enum OperationType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Operation { 
     pub op_type: OperationType,
-    pub ids: Vec<(ArenaId, u32, u32)>,
+    pub ids: Vec<(Identifier, u32, u32)>,
     pub payload: Option<String>,
     pub site: u32, 
     pub clock: u32
@@ -64,7 +64,7 @@ pub struct OpLog {
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
     // pub pending: Vec<Operation>
-    pub pending: HashMap<ArenaId, Vec<Operation>>
+    pub pending: HashMap<Identifier, Vec<Operation>>
 }
 
 impl OpLog { 
@@ -89,7 +89,7 @@ impl OpLog {
         self.pending.entry(id).or_default().push(op);   
     }
 
-    pub fn get_pending_for_id(&mut self, id: &ArenaId) -> Vec<Operation> {
+    pub fn get_pending_for_id(&mut self, id: &Identifier) -> Vec<Operation> {
         self.pending.remove(id).unwrap_or_default()
     }
 
