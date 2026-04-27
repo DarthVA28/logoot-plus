@@ -356,7 +356,7 @@ impl IdArena {
         let mut sp = 0;
         for i in 0..text_len {
             // Compare short_slice ++ [lo + i] against long_slice
-            let ref_i = IdentifierRef::new(idi_short.base, idi_short.lo + i);
+            // let ref_i = IdentifierRef::new(idi_short.base, idi_short.lo + i);
             // Inline the comparison to avoid function call overhead in the loop
             let cmp = short_slice.iter().chain(std::iter::once(&(idi_short.lo + i)))
                 .cmp(long_slice.iter());
@@ -548,7 +548,7 @@ mod tests {
         let mut arena = IdArena::new();
         let a = arena.intern(&[10]);
         let b = arena.intern(&[20]);
-        let c = arena.intern(&[30]);
+        // let c = arena.intern(&[30]);
 
         // a before b
         assert!(matches!(
