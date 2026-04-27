@@ -63,10 +63,12 @@ impl Tree {
         self.free_list.push(idx);
     }
 
+    #[inline(always)]
     fn node_height(&self, node: Option<usize>) -> i32 { 
         node.map_or(0, |index| self.nodes[index].height)
     }
 
+    #[inline(always)]
     fn node_subtree_count(&self, node: Option<usize>) -> usize { 
         node.map_or(0, |index| self.nodes[index].subtree_count)
     }
@@ -75,10 +77,12 @@ impl Tree {
         node.map_or("", |index| &self.nodes[index].content)
     }
 
+    #[inline(always)]
     pub fn node_size(&self, node: Option<usize>) -> usize { 
         node.map_or(0, |index| self.nodes[index].size)
     }
 
+    #[inline(always)]
     pub fn node_left_count(&self, node: Option<usize>) -> usize { 
         if node.is_none() { return 0; }
         let left= self.nodes[node.unwrap()].left;
@@ -163,6 +167,7 @@ impl Tree {
 
 /* Rotation and Rebalancing Functions */
 impl Tree {
+    #[inline(always)]
     fn update_node(&mut self, idx: usize) {
         let left = self.nodes[idx].left;
         let right = self.nodes[idx].right;
