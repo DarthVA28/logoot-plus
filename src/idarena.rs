@@ -1,79 +1,151 @@
-///! Arena-interned identifiers for LogootSplit.
+///! Chunked arena-interned identifiers for LogootSplit.
 ///!
-///! All identifier paths are stored contiguously in a single `Vec<u32>`.
-///! Each unique path is stored exactly once (interned).  An identifier
-///! becomes a lightweight `ArenaId` — 12 bytes, `Copy` — holding an
-///! offset into the arena plus an inline prefix cache.
+///! Each path is stored as a sequence of u128 chunks, where each chunk
+///! packs 8 × u16 components.  Comparison reduces to lexicographic
+///! comparison of u128 sequences — ~8× fewer compares than per-component,
+///! all on contiguous prefetcher-friendly memory.
 ///!
-///! ## Performance characteristics
+///! Layout of a u128 chunk (MSB to LSB):
+///!   bits 127..112: position 0 (16 bits, value+1 encoded)
+///!   bits 111..96:  position 1
+///!   bits 95..80:   position 2
+///!   bits 79..64:   position 3
+///!   bits 63..48:   position 4
+///!   bits 47..32:   position 5
+///!   bits 31..16:   position 6
+///!   bits 15..0:    position 7
 ///!
-///! | Operation        | Arc<[u32]> (old) | Trie (attempted) | Arena (this)      |
-///! |------------------|------------------|-------------------|-------------------|
-///! | Equality         | O(depth)         | O(1)              | O(1)              |
-///! | Hash             | O(depth)         | O(1)              | O(1)              |
-///! | Comparison       | O(depth) seq     | O(log D) random   | O(depth) seq      |
-///! | Clone/Drop       | atomic refcount  | free (Copy)       | free (Copy)       |
-///! | Memory per ID    | 16+ bytes heap   | 28 bytes inline   | 12 bytes inline   |
-///! | Comparison cache | L1-unfriendly    | L1-unfriendly     | L1-friendly       |
+///! Value+1 encoding: stored as (v + 1) so 0 means "no component here",
+///! which sorts before any real value.  Lets shorter paths sort before
+///! longer paths with the same prefix automatically.
 ///!
-///! The key insight: O(depth) with sequential memory access beats O(log D)
-///! with random access for typical CRDT identifier depths (5-20 components).
-///! LLVM auto-vectorises `[u32]` slice comparison, so we get ~4 components
-///! compared per cycle on AVX2.
+///! Note: MAX_VALUE is 65534 (u16::MAX - 1) to leave room for value+1.
 
 use std::cmp::Ordering;
 use ahash::AHashMap as HashMap;
+use smallvec::SmallVec;
 
 // ───────────────────────── Constants ──────────────────────────
 
 pub const MIN_VALUE: u32 = 0;
-pub const MAX_VALUE: u32 = 100000;
+/// One less than u16::MAX to allow value+1 encoding without overflow.
+pub const MAX_VALUE: u32 = 65534;
 pub type Range = (u32, u32);
 
-/// Sentinel offset meaning "empty identifier".
-const EMPTY_OFFSET: u32 = u32::MAX;
+const COMPONENTS_PER_CHUNK: usize = 8;
 
-// ───────────────────────── ArenaId ───────────────────────────
+const EMPTY_CHUNKS_OFFSET: u32 = u32::MAX;
 
-/// Lightweight handle to an interned identifier.  12 bytes, `Copy`.
+// ───────────────────────── Encoding helpers ───────────────────
+
+/// Pack up to 8 components into a u128 chunk (MSB-first, value+1 encoded).
 ///
-/// Two `ArenaId`s with the same `offset` are guaranteed to represent
-/// the same path (interning ensures uniqueness), so equality and
-/// hashing are O(1).
+/// Slot k (0-indexed from start of components) goes in bits
+/// [16*(7-k), 16*(7-k)+15].  So position 0 is in bits 127..112 (highest).
+#[inline(always)]
+fn pack_chunk(components: &[u32]) -> u128 {
+    debug_assert!(components.len() <= COMPONENTS_PER_CHUNK);
+    let mut chunk: u128 = 0;
+    for (i, &v) in components.iter().enumerate() {
+        debug_assert!(v <= MAX_VALUE);
+        let shift = (COMPONENTS_PER_CHUNK - 1 - i) * 16;
+        chunk |= ((v as u128) + 1) << shift;
+    }
+    chunk
+}
+
+/// Unpack a u128 chunk back into up to 8 components, appending to `out`.
+#[inline]
+fn unpack_chunk(chunk: u128, count: usize, out: &mut Vec<u32>) {
+    debug_assert!(count <= COMPONENTS_PER_CHUNK);
+    for i in 0..count {
+        let shift = (COMPONENTS_PER_CHUNK - 1 - i) * 16;
+        let encoded = ((chunk >> shift) & 0xFFFF) as u32;
+        debug_assert!(encoded > 0, "unpack on empty slot");
+        out.push(encoded - 1);
+    }
+}
+
+/// Pack a path into a sequence of u128 chunks.
+fn pack_path(path: &[u32]) -> SmallVec<[u128; 4]> {
+    let mut chunks = SmallVec::new();
+    for chunk_components in path.chunks(COMPONENTS_PER_CHUNK) {
+        chunks.push(pack_chunk(chunk_components));
+    }
+    chunks
+}
+
+/// Number of chunks needed to hold `len` components.
+#[inline(always)]
+fn chunks_needed(len: usize) -> usize {
+    (len + COMPONENTS_PER_CHUNK - 1) / COMPONENTS_PER_CHUNK
+}
+
+// ───────────────────────── ArenaId ────────────────────────────
+
+/// Lightweight handle to an interned identifier.  32 bytes, `Copy`.
+///
+/// The first chunk is stored inline so common-case comparison
+/// (resolves in first 8 components) requires zero arena access.
 #[derive(Clone, Copy, Debug)]
 pub struct Identifier {
-    /// Byte offset into `IdArena::data`.  EMPTY_OFFSET = empty path.
-    offset: u32,
-    /// Number of `u32` components in this path.
+    /// Offset into `IdArena::extra_chunks` for chunk 1 onward.
+    /// EMPTY_CHUNKS_OFFSET if path has 0 or 1 chunks.
+    chunks_offset: u32,
+    /// Total number of components in the full path.
     len: u16,
-    // Padding: 2 bytes free here due to alignment.
+    /// Number of chunks beyond the inline first chunk.
+    extra_chunks: u16,
+    /// First chunk packed inline.  0 for empty path.
+    first_chunk: u128,
 }
 
 impl Identifier {
-    pub const EMPTY: Identifier = Identifier { offset: EMPTY_OFFSET, len: 0 };
+    pub const EMPTY: Identifier = Identifier {
+        chunks_offset: EMPTY_CHUNKS_OFFSET,
+        len: 0,
+        extra_chunks: 0,
+        first_chunk: 0,
+    };
 
     #[inline(always)]
-    pub fn is_empty(self) -> bool { self.offset == EMPTY_OFFSET }
+    pub fn is_empty(self) -> bool { self.len == 0 }
 
     #[inline(always)]
     pub fn depth(self) -> u16 { self.len }
+
+    #[inline(always)]
+    fn total_chunks(self) -> usize {
+        if self.len == 0 { 0 } else { 1 + self.extra_chunks as usize }
+    }
 }
 
 impl PartialEq for Identifier {
     #[inline(always)]
-    fn eq(&self, other: &Self) -> bool { self.offset == other.offset }
+    fn eq(&self, other: &Self) -> bool {
+        // For interned IDs, identical paths share storage:
+        // - len matches
+        // - first_chunk matches
+        // - chunks_offset matches (or both are EMPTY_CHUNKS_OFFSET)
+        self.len == other.len
+            && self.first_chunk == other.first_chunk
+            && self.chunks_offset == other.chunks_offset
+    }
 }
 impl Eq for Identifier {}
 
 impl std::hash::Hash for Identifier {
     #[inline(always)]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.offset.hash(state); }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // chunks_offset alone uniquely identifies long paths; first_chunk
+        // uniquely identifies short paths.  Hash both for safety + speed.
+        self.first_chunk.hash(state);
+        self.chunks_offset.hash(state);
+    }
 }
 
 // ───────────────────────── ArenaIdRef ────────────────────────
 
-/// An identifier extended by one extra component (the offset into an
-/// `IdentifierInterval`).  Replaces the old `IdentifierRef`.
 #[derive(Clone, Copy, Debug)]
 pub struct IdentifierRef {
     pub base: Identifier,
@@ -97,7 +169,9 @@ pub struct IdentifierInterval {
 }
 
 impl IdentifierInterval {
-    pub fn new(base: Identifier, lo: u32, hi: u32) -> Self { IdentifierInterval { base, lo, hi } }
+    pub fn new(base: Identifier, lo: u32, hi: u32) -> Self {
+        IdentifierInterval { base, lo, hi }
+    }
     pub fn id_begin(&self) -> IdentifierRef { IdentifierRef::new(self.base, self.lo) }
     pub fn id_end(&self)   -> IdentifierRef { IdentifierRef::new(self.base, self.hi - 1) }
 }
@@ -116,161 +190,225 @@ pub enum IdOrderingRelation {
 
 // ───────────────────────── IdArena ────────────────────────────
 
-/// Central store for all identifier paths.  Owned by `Document`.
-///
-/// Paths are appended to a single contiguous `Vec<u32>`.  Deduplication
-/// ensures each unique path is stored exactly once.
 #[derive(Clone, Debug)]
 pub struct IdArena {
-    /// All path components, packed contiguously.
-    /// Path at offset `o` with length `l` = `data[o..o+l]`.
-    data: Vec<u32>,
-    /// Deduplication index: content hash → list of (offset, len).
-    /// On insert, we hash the input slice, find candidates, and
-    /// compare content to confirm.
-    dedup: HashMap<u64, smallvec::SmallVec<[(u32, u16); 1]>>,
+    /// Chunks beyond the first (the first is inlined on ArenaId).
+    /// All paths' extra chunks are concatenated; ArenaId::chunks_offset
+    /// points to where each path's chunk-1-onward starts.
+    extra_chunks: Vec<u128>,
+    /// Dedup index: hash → list of (chunks_offset, len, first_chunk).
+    dedup: HashMap<u64, SmallVec<[(u32, u16, u128); 1]>>,
 }
 
 impl IdArena {
     pub fn new() -> Self {
         IdArena {
-            data: Vec::with_capacity(4096),
+            extra_chunks: Vec::with_capacity(2048),
             dedup: HashMap::with_capacity(1024),
         }
     }
 
     pub fn clear(&mut self) {
-        self.data.clear();
+        self.extra_chunks.clear();
         self.dedup.clear();
     }
 
     // ── Interning ────────────────────────────────────────────
 
-    /// Intern a path, returning a deduplicated `ArenaId`.
-    /// If this exact path was previously interned, returns the same
-    /// `ArenaId` (same offset).
     pub fn intern(&mut self, path: &[u32]) -> Identifier {
         if path.is_empty() { return Identifier::EMPTY; }
 
-        let hash = self.hash_slice(path);
         let len = path.len() as u16;
+        let chunks = pack_path(path);
+        debug_assert!(!chunks.is_empty());
 
-        // Check for existing entry with same hash
+        let first_chunk = chunks[0];
+        let extras_count = chunks.len() - 1;
+
+        let hash = compute_hash(first_chunk, len, &chunks[1..]);
+
+        // Check existing entries
         if let Some(candidates) = self.dedup.get(&hash) {
-            for &(offset, cand_len) in candidates {
-                if cand_len == len {
-                    let stored = &self.data[offset as usize..(offset as usize + len as usize)];
-                    if stored == path {
-                        return Identifier { offset, len };
-                    }
+            for &(co, clen, cfirst) in candidates {
+                if clen != len || cfirst != first_chunk { continue; }
+                let stored_extras = if extras_count > 0 {
+                    &self.extra_chunks[co as usize..co as usize + extras_count]
+                } else {
+                    &[][..]
+                };
+                if stored_extras == &chunks[1..] {
+                    return Identifier {
+                        chunks_offset: co,
+                        len,
+                        extra_chunks: extras_count as u16,
+                        first_chunk,
+                    };
                 }
             }
         }
 
         // Not found — append to arena
-        let offset = self.data.len() as u32;
-        self.data.extend_from_slice(path);
-        self.dedup.entry(hash).or_default().push((offset, len));
-        Identifier { offset, len }
+        let chunks_offset = if extras_count > 0 {
+            let off = self.extra_chunks.len() as u32;
+            self.extra_chunks.extend_from_slice(&chunks[1..]);
+            off
+        } else {
+            EMPTY_CHUNKS_OFFSET
+        };
+
+        self.dedup.entry(hash).or_default().push((chunks_offset, len, first_chunk));
+
+        Identifier {
+            chunks_offset,
+            len,
+            extra_chunks: extras_count as u16,
+            first_chunk,
+        }
     }
 
-    #[inline]
-    fn hash_slice(&self, path: &[u32]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = ahash::AHasher::default();
-        path.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    // ── Slice access ─────────────────────────────────────────
-
-    /// Get the path components for an `ArenaId`.
-    /// This is an O(1) slice lookup — no allocation, no copying.
+    /// Get the n-th chunk (0-indexed).
     #[inline(always)]
-    pub fn get_slice(&self, id: Identifier) -> &[u32] {
-        if id.is_empty() { return &[]; }
-        &self.data[id.offset as usize..(id.offset as usize + id.len as usize)]
+    fn get_chunk(&self, id: Identifier, n: usize) -> u128 {
+        if n == 0 { return id.first_chunk; }
+        debug_assert!(n <= id.extra_chunks as usize);
+        self.extra_chunks[id.chunks_offset as usize + n - 1]
     }
 
-    // ── Comparison ───────────────────────────────────────────
+    /// Slice of all extra chunks for an ID.
+    #[inline(always)]
+    fn extras_slice(&self, id: Identifier) -> &[u128] {
+        if id.extra_chunks == 0 { return &[]; }
+        let start = id.chunks_offset as usize;
+        let end = start + id.extra_chunks as usize;
+        &self.extra_chunks[start..end]
+    }
 
-    /// Compare two identifiers lexicographically.
-    /// O(1) if same id, O(depth) sequential scan otherwise.
+    // ── Comparison: ArenaId vs ArenaId ───────────────────────
+
+    /// Compare two interned IDs lexicographically.  O(D/8) chunk compares.
     #[inline]
     pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
-        if a.offset == b.offset { return Ordering::Equal; }
-        self.get_slice(a).cmp(self.get_slice(b))
+        if a == b { return Ordering::Equal; }
+        if a.is_empty() && b.is_empty() { return Ordering::Equal; }
+        if a.is_empty() { return Ordering::Less; }
+        if b.is_empty() { return Ordering::Greater; }
+
+        // Fast path: most comparisons resolve in first 8 components
+        if a.first_chunk != b.first_chunk {
+            return a.first_chunk.cmp(&b.first_chunk);
+        }
+
+        // First chunks equal.  Compare extra chunks lexicographically.
+        let ea = self.extras_slice(a);
+        let eb = self.extras_slice(b);
+        let min_len = ea.len().min(eb.len());
+
+        // Sequential u128 comparison — prefetcher-friendly
+        for i in 0..min_len {
+            if ea[i] != eb[i] {
+                return ea[i].cmp(&eb[i]);
+            }
+        }
+
+        // All shared chunks equal.  Shorter wins (lex prefix rule).
+        // BUT: if one has more chunks, the trailing chunks may have
+        // empty slots (zero-padded), and value+1 encoding makes those
+        // sort before any real component.  So checking len directly works.
+        a.len.cmp(&b.len)
     }
 
-    /// Compare two `ArenaIdRef`s (base path + extra) lexicographically.
+    // ── Comparison: ArenaIdRef vs ArenaIdRef ─────────────────
+
+    /// Compare two ArenaIdRefs (base path + extra component) lexicographically.
     ///
-    /// Conceptual paths: `slice(a.base) ++ [a.extra]` vs `slice(b.base) ++ [b.extra]`.
+    /// Conceptually: path(a.base) ++ [a.extra] vs path(b.base) ++ [b.extra].
     ///
-    /// Optimised to avoid iterator chaining in the hot path.
-    #[inline]
+    /// We compare base chunks normally, then handle the extras at whatever
+    /// position they fall.  Most comparisons resolve in the bases' first
+    /// chunks without ever reading the extras.
     pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
-        // Fast path: same base → just compare extras
-        if a.base.offset == b.base.offset {
+        // Fast path: same base → compare extras directly
+        if a.base == b.base {
             return a.extra.cmp(&b.extra);
         }
 
-        let sa = self.get_slice(a.base);
-        let sb = self.get_slice(b.base);
-
-        let min_len = sa.len().min(sb.len());
-
-        // Compare the shared prefix.  LLVM will auto-vectorise this
-        // slice comparison on x86-64 with SSE2/AVX2.
-        match sa[..min_len].cmp(&sb[..min_len]) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // Shared prefix is equal.  Now compare the tails.
-        // The conceptual sequences are:
-        //   a: sa[0..sa.len()] ++ [a.extra]
-        //   b: sb[0..sb.len()] ++ [b.extra]
+        // To compare path(a) ++ [extra_a] vs path(b) ++ [extra_b], we need
+        // to find where they first diverge.  The bases may diverge first,
+        // or they may share a long prefix and diverge in the extras.
         //
-        // We've matched [0..min_len).  Position min_len:
-        //   - If sa.len() == sb.len(): both have extra → compare extras
-        //   - If sa.len() < sb.len():  a has extra, b has sb[min_len]
-        //   - If sa.len() > sb.len():  a has sa[min_len], b has extra
-        match sa.len().cmp(&sb.len()) {
-            Ordering::Equal => a.extra.cmp(&b.extra),
-            Ordering::Less => {
-                // a: extra at position min_len;  b: sb[min_len]
-                match a.extra.cmp(&sb[min_len]) {
-                    Ordering::Equal => {
-                        // a is shorter (min_len + 1 components) vs b has more
-                        Ordering::Less
-                    }
-                    ord => ord,
-                }
-            }
-            Ordering::Greater => {
-                // a: sa[min_len];  b: extra at position min_len
-                match sa[min_len].cmp(&b.extra) {
-                    Ordering::Equal => {
-                        // b is shorter
-                        Ordering::Greater
-                    }
-                    ord => ord,
-                }
+        // Strategy: pretend both refs are "virtual chunked sequences" of
+        // length len+1, and compare chunk-by-chunk.  For each chunk index:
+        //  - If neither has the extra in this chunk, compare base chunks directly.
+        //  - If exactly one has its extra in this chunk, build that chunk
+        //    on the fly with the extra inserted at the right slot.
+        //  - If both have extras in this chunk (only when both have same
+        //    length and we're in the final chunk), build both chunks.
+
+        let a_total_len = a.base.len as usize + 1; // including the extra
+        let b_total_len = b.base.len as usize + 1;
+        let a_chunks = chunks_needed(a_total_len);
+        let b_chunks = chunks_needed(b_total_len);
+        let min_chunks = a_chunks.min(b_chunks);
+
+        // Position of the extra component within its full path:
+        let a_extra_pos = a.base.len as usize;
+        let b_extra_pos = b.base.len as usize;
+        let a_extra_chunk = a_extra_pos / COMPONENTS_PER_CHUNK;
+        let b_extra_chunk = b_extra_pos / COMPONENTS_PER_CHUNK;
+        let a_extra_slot = a_extra_pos % COMPONENTS_PER_CHUNK;
+        let b_extra_slot = b_extra_pos % COMPONENTS_PER_CHUNK;
+
+        for i in 0..min_chunks {
+            let ca = self.chunk_with_extra(a, i, a_extra_chunk, a_extra_slot);
+            let cb = self.chunk_with_extra(b, i, b_extra_chunk, b_extra_slot);
+            if ca != cb {
+                return ca.cmp(&cb);
             }
         }
+
+        // All shared chunks equal — shorter total path is lexicographically less
+        a_total_len.cmp(&b_total_len)
+    }
+
+    /// Get the i-th chunk of the conceptual path `path(ref.base) ++ [ref.extra]`,
+    /// inserting the extra into the appropriate slot if i is the chunk that
+    /// contains the extra.
+    #[inline]
+    fn chunk_with_extra(
+        &self,
+        r: IdentifierRef,
+        i: usize,
+        extra_chunk: usize,
+        extra_slot: usize,
+    ) -> u128 {
+        // Get the base chunk if it exists, else 0.
+        let base_chunk = if i < r.base.total_chunks() {
+            self.get_chunk(r.base, i)
+        } else {
+            0
+        };
+
+        // If this chunk doesn't contain the extra, return base chunk unchanged.
+        if i != extra_chunk {
+            return base_chunk;
+        }
+
+        // Insert the extra at extra_slot.  The slot is currently 0 in
+        // base_chunk (since the base path didn't reach that position).
+        let shift = (COMPONENTS_PER_CHUNK - 1 - extra_slot) * 16;
+        let encoded = (r.extra as u128 + 1) << shift;
+        base_chunk | encoded
     }
 
     // ── Interval comparison ──────────────────────────────────
 
-    /// Compare two identifier intervals.  Restructured to use at most
-    /// 2 `compare_refs` calls instead of up to 4.
     #[inline(always)]
     pub fn compare_intervals_raw(
         &self,
         b1_base: Identifier, b1_lo: u32, b1_hi: u32,
         b2_base: Identifier, b2_lo: u32, b2_hi: u32,
     ) -> IdOrderingRelation {
-        // Fast path: same base → pure offset arithmetic, no comparison needed
+        // Same base → pure offset arithmetic, no comparison
         if b1_base == b2_base {
             if b1_lo == b2_lo && b1_hi == b2_hi {
                 return IdOrderingRelation::B1EqualsB2;
@@ -289,15 +427,12 @@ impl IdArena {
             }
         }
 
-        // Different bases: compare begin points first (1 comparison),
-        // then conditionally check containment (1 more comparison).
-        // Total: at most 2 compare_refs calls.
+        // Different bases: at most 2 ref comparisons
         let b1_begin = IdentifierRef::new(b1_base, b1_lo);
         let b2_begin = IdentifierRef::new(b2_base, b2_lo);
 
         match self.compare_refs(b1_begin, b2_begin) {
             Ordering::Less => {
-                // b1 starts before b2.  Check if b2_begin < b1_end (containment).
                 let b1_end = IdentifierRef::new(b1_base, b1_hi - 1);
                 if self.compare_refs(b2_begin, b1_end) == Ordering::Less {
                     IdOrderingRelation::B2InsideB1
@@ -306,7 +441,6 @@ impl IdArena {
                 }
             }
             Ordering::Greater => {
-                // b2 starts before b1.  Check if b1_begin < b2_end (containment).
                 let b2_end = IdentifierRef::new(b2_base, b2_hi - 1);
                 if self.compare_refs(b1_begin, b2_end) == Ordering::Less {
                     IdOrderingRelation::B1InsideB2
@@ -314,11 +448,7 @@ impl IdArena {
                     IdOrderingRelation::B1AfterB2
                 }
             }
-            Ordering::Equal => {
-                // Same begin but different bases — shouldn't happen in
-                // well-formed LogootSplit, but handle gracefully.
-                IdOrderingRelation::B1BeforeB2
-            }
+            Ordering::Equal => IdOrderingRelation::B1BeforeB2,
         }
     }
 
@@ -329,39 +459,28 @@ impl IdArena {
 
     // ── num_insertable ───────────────────────────────────────
 
+    /// How many chars insertable at id_insert before colliding with id_next.
     pub fn num_insertable(&self, id_insert: IdentifierRef, id_next: IdentifierRef, length: u32) -> u32 {
-        let insert_slice = self.get_slice(id_insert.base);
-        let next_slice = self.get_slice(id_next.base);
-        let l = insert_slice.len();
+        let l = id_insert.base.len as usize;
+        let next_full_len = id_next.base.len as usize + 1;
 
-        // next's full path length = next_slice.len() + 1 (the extra)
-        if l >= next_slice.len() + 1 { return length; }
+        if l >= next_full_len { return length; }
 
-        // Check: insert's base must be a prefix of next's full path
-        let next_full_iter = next_slice.iter().chain(std::iter::once(&id_next.extra));
-        for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
+        // Need: insert's base path is a prefix of next's full path.
+        // Walk through and check.
+        let insert_path = self.get_path_owned(id_insert.base);
+        let next_path = self.get_path_owned(id_next.base);
+
+        let next_full_iter = next_path.iter().chain(std::iter::once(&id_next.extra));
+        for (&a, &b) in insert_path.iter().zip(next_full_iter) {
             if a != b { return length; }
         }
 
-        let next_at_l = if l < next_slice.len() { next_slice[l] } else { id_next.extra };
+        let next_at_l = if l < next_path.len() { next_path[l] } else { id_next.extra };
         next_at_l + 1 - id_insert.extra
     }
 
-    // ── find_split_point ─────────────────────────────────────
-
-    // pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: Identifier) -> u32 {
-    //     let long_slice = self.get_slice(id_long);
-    //     let text_len = idi_short.hi - idi_short.lo;
-    //     let short_slice = self.get_slice(idi_short.base);
-    //     let mut sp = 0;
-    //     for i in 0..text_len {
-    //         let cmp = short_slice.iter().chain(std::iter::once(&(idi_short.lo + i)))
-    //             .cmp(long_slice.iter());
-    //         if cmp != Ordering::Less { break; }
-    //         sp += 1;
-    //     }
-    //     sp
-    // }
+    // ── find_split_point (O(1) arithmetic version) ───────────
 
     pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: Identifier) -> u32 {
         if id_long.is_empty() { return 0; }
@@ -369,62 +488,76 @@ impl IdArena {
         let text_len = idi_short.hi - idi_short.lo;
         if text_len == 0 { return 0; }
 
-        let long_slice = self.get_slice(id_long);
-        let short_slice = self.get_slice(idi_short.base);
-        let min_len = short_slice.len().min(long_slice.len());
+        let long_path = self.get_path_owned(id_long);
+        let short_path = self.get_path_owned(idi_short.base);
 
-        // Compare the shared prefix once, outside the binary search.
-        match short_slice[..min_len].cmp(&long_slice[..min_len]) {
-            Ordering::Less => {
-                return text_len;
-            }
-            Ordering::Greater => {
-                return 0;
-            }
+        let min_len = short_path.len().min(long_path.len());
+
+        // Compare prefix once
+        match short_path[..min_len].cmp(&long_path[..min_len]) {
+            Ordering::Less => return text_len,
+            Ordering::Greater => return 0,
             Ordering::Equal => {}
         }
 
-        // Prefixes match. Now ordering depends on what comes after position min_len.
-        if short_slice.len() < long_slice.len() {
-            let pivot = long_slice[min_len];
-            let extras_below = if long_slice.len() > min_len + 1 {
+        if short_path.len() < long_path.len() {
+            let pivot = long_path[min_len];
+            let extras_below = if long_path.len() > min_len + 1 {
                 pivot.saturating_add(1).saturating_sub(idi_short.lo)
             } else {
-                // ref < long whenever extra < pivot
                 pivot.saturating_sub(idi_short.lo)
             };
-            return extras_below.min(text_len);
-        } else if short_slice.len() == long_slice.len() {
-            return 0;
+            extras_below.min(text_len)
         } else {
-            return 0;
+            // short_path.len() >= long_path.len(); since prefixes equal,
+            // long is a prefix of short, so any ref > long.
+            0
         }
     }
 
-    // ── Path access (for serialisation / debug) ──────────────
+    // ── Path materialisation ─────────────────────────────────
 
-    /// Get the full path as a slice.  Zero allocation.
-    #[inline(always)]
-    pub fn get_path(&self, id: Identifier) -> &[u32] {
-        self.get_slice(id)
+    /// Reconstruct the full path as a Vec<u32>.
+    pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
+        if id.is_empty() { return Vec::new(); }
+        let mut path = Vec::with_capacity(id.len as usize);
+        let total = id.total_chunks();
+        for i in 0..total {
+            let chunk = self.get_chunk(id, i);
+            let in_this_chunk = if i + 1 < total {
+                COMPONENTS_PER_CHUNK
+            } else {
+                // Last chunk: only the components that fit
+                let remaining = id.len as usize - i * COMPONENTS_PER_CHUNK;
+                remaining
+            };
+            unpack_chunk(chunk, in_this_chunk, &mut path);
+        }
+        path
     }
 
-    /// Get the full path as an owned Vec (for serialisation).
-    pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
-        self.get_slice(id).to_vec()
+    /// Backwards-compat alias.
+    #[inline]
+    pub fn get_path(&self, id: Identifier) -> Vec<u32> {
+        self.get_path_owned(id)
     }
 
     pub fn to_string(&self, id: Identifier) -> String {
-        self.get_slice(id).iter().map(|x| x.to_string()).collect::<Vec<_>>().join(".")
+        self.get_path_owned(id).iter().map(|x| x.to_string()).collect::<Vec<_>>().join(".")
     }
 
-    pub fn node_count(&self) -> usize {
-        self.dedup.values().map(|v| v.len()).sum()
-    }
+    pub fn arena_size(&self) -> usize { self.extra_chunks.len() }
+    pub fn node_count(&self) -> usize { self.dedup.values().map(|v| v.len()).sum() }
+}
 
-    pub fn arena_size(&self) -> usize {
-        self.data.len()
-    }
+#[inline]
+fn compute_hash(first: u128, len: u16, extras: &[u128]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = ahash::AHasher::default();
+    first.hash(&mut h);
+    len.hash(&mut h);
+    for c in extras { c.hash(&mut h); }
+    h.finish()
 }
 
 // ───────────────────────── generate_base ──────────────────────
@@ -438,12 +571,12 @@ pub fn generate_base(
     id_high: IdentifierRef,
     state: &mut State,
 ) -> Identifier {
-    let low_slice = arena.get_slice(id_low.base);
-    let high_slice = arena.get_slice(id_high.base);
+    let low_path = arena.get_path_owned(id_low.base);
+    let high_path = arena.get_path_owned(id_high.base);
 
     let mut new_path: Vec<u32> = Vec::new();
-    let mut low_iter = low_slice.iter().copied().chain(std::iter::once(id_low.extra));
-    let mut high_iter = high_slice.iter().copied().chain(std::iter::once(id_high.extra));
+    let mut low_iter = low_path.iter().copied().chain(std::iter::once(id_low.extra));
+    let mut high_iter = high_path.iter().copied().chain(std::iter::once(id_high.extra));
 
     let mut l = low_iter.next().unwrap_or(MIN_VALUE);
     let mut h = high_iter.next().unwrap_or(MAX_VALUE);
@@ -469,29 +602,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_intern_deduplication() {
+    fn test_pack_unpack_roundtrip() {
+        let path = [10, 20, 30, 40, 50, 60, 70, 80];
+        let chunk = pack_chunk(&path);
+        let mut out = Vec::new();
+        unpack_chunk(chunk, 8, &mut out);
+        assert_eq!(out, path);
+    }
+
+    #[test]
+    fn test_pack_short() {
+        let path = [10, 20, 30];
+        let chunk = pack_chunk(&path);
+        let mut out = Vec::new();
+        unpack_chunk(chunk, 3, &mut out);
+        assert_eq!(out, path);
+    }
+
+    #[test]
+    fn test_pack_chunk_ordering() {
+        // [1,2,3] < [1,2,4] should give ck1 < ck2
+        let c1 = pack_chunk(&[1, 2, 3]);
+        let c2 = pack_chunk(&[1, 2, 4]);
+        assert!(c1 < c2);
+
+        // [1,2] (zero-padded in slots 2..7) < [1,2,1] because
+        // zero (encoded as 0) is less than 1+1 (encoded as 2)
+        let c3 = pack_chunk(&[1, 2]);
+        let c4 = pack_chunk(&[1, 2, 1]);
+        assert!(c3 < c4);
+
+        // [2] should be greater than [1, 99, 99, 99...]
+        let c5 = pack_chunk(&[2]);
+        let c6 = pack_chunk(&[1, 99, 99, 99, 99, 99, 99, 99]);
+        assert!(c5 > c6);
+    }
+
+    #[test]
+    fn test_intern_dedup() {
         let mut arena = IdArena::new();
         let a = arena.intern(&[5, 12, 3, 99]);
         let b = arena.intern(&[5, 12, 3, 99]);
         assert_eq!(a, b);
-        assert_eq!(a.offset, b.offset); // same storage
-        assert_eq!(arena.arena_size(), 4); // stored once
-
         let c = arena.intern(&[5, 12, 3, 120]);
         assert_ne!(a, c);
-        assert_eq!(arena.arena_size(), 8); // two paths stored
     }
 
     #[test]
-    fn test_get_path() {
+    fn test_get_path_short() {
         let mut arena = IdArena::new();
         let id = arena.intern(&[10, 20, 30]);
-        assert_eq!(arena.get_path(id), &[10, 20, 30]);
-        assert_eq!(arena.get_path(Identifier::EMPTY), &[] as &[u32]);
+        assert_eq!(arena.get_path_owned(id), vec![10, 20, 30]);
+        assert_eq!(arena.get_path_owned(Identifier::EMPTY), Vec::<u32>::new());
     }
 
     #[test]
-    fn test_compare_ids() {
+    fn test_get_path_long() {
+        let mut arena = IdArena::new();
+        let path: Vec<u32> = (0..25).collect();
+        let id = arena.intern(&path);
+        assert_eq!(arena.get_path_owned(id), path);
+        assert_eq!(id.total_chunks(), 4); // 25/8 = 4 chunks
+    }
+
+    #[test]
+    fn test_compare_ids_basic() {
         let mut arena = IdArena::new();
         let a = arena.intern(&[1, 2, 3]);
         let b = arena.intern(&[1, 2, 3]);
@@ -502,6 +677,31 @@ mod tests {
 
         let d = arena.intern(&[1, 2]);
         assert_eq!(arena.compare_ids(d, a), Ordering::Less); // prefix < longer
+
+        let e = arena.intern(&[5, 99, 1]);
+        let f = arena.intern(&[10, 1, 1]);
+        assert_eq!(arena.compare_ids(e, f), Ordering::Less);
+    }
+
+    #[test]
+    fn test_compare_ids_deep() {
+        let mut arena = IdArena::new();
+        let path_a: Vec<u32> = (0..30).collect();
+        let mut path_b = path_a.clone();
+        path_b[25] = 999;
+        let a = arena.intern(&path_a);
+        let b = arena.intern(&path_b);
+        assert_eq!(arena.compare_ids(a, b), Ordering::Less);
+
+        // Differ in last chunk only
+        let mut path_c = path_a.clone();
+        path_c[28] = 999;
+        let c = arena.intern(&path_c);
+        assert_eq!(arena.compare_ids(a, c), Ordering::Less);
+
+        // Prefix
+        let d = arena.intern(&path_a[..15]);
+        assert_eq!(arena.compare_ids(d, a), Ordering::Less);
     }
 
     #[test]
@@ -520,7 +720,7 @@ mod tests {
         let bb = arena.intern(&[5, 12, 3]);
         // [5,12,3] vs [5,12,3,99] → Less (prefix)
         assert_eq!(arena.compare_refs(IdentifierRef::new(ba, 3), IdentifierRef::new(bb, 99)), Ordering::Less);
-        // [5,12,4] vs [5,12,3,99] → Greater (4 > 3 at position 2)
+        // [5,12,4] vs [5,12,3,99] → Greater
         assert_eq!(arena.compare_refs(IdentifierRef::new(ba, 4), IdentifierRef::new(bb, 99)), Ordering::Greater);
     }
 
@@ -528,15 +728,38 @@ mod tests {
     fn test_compare_refs_empty_base() {
         let mut arena = IdArena::new();
         let base = arena.intern(&[5, 10]);
-        // [0] vs [5,10,99]
         assert_eq!(
             arena.compare_refs(IdentifierRef::doc_start(), IdentifierRef::new(base, 99)),
             Ordering::Less
         );
-        // [100000] vs [5,10,99]
         assert_eq!(
             arena.compare_refs(IdentifierRef::doc_end(), IdentifierRef::new(base, 99)),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_refs_extra_in_second_chunk() {
+        let mut arena = IdArena::new();
+        // Base length 8 → extra is in chunk 1, slot 0
+        let ba = arena.intern(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Base length 8, different last component → extras compared in chunk 1
+        let bb = arena.intern(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Same base → just compare extras
+        assert_eq!(
+            arena.compare_refs(IdentifierRef::new(ba, 5), IdentifierRef::new(bb, 10)),
+            Ordering::Less
+        );
+
+        // Different bases of length 8, extras pushed into chunk 1
+        let bc = arena.intern(&[1, 2, 3, 4, 5, 6, 7, 9]);
+        // Now ba ends in 8, bc ends in 9; with extras [5] and [5]:
+        //   ba+[5] = [1..7, 8, 5]
+        //   bc+[5] = [1..7, 9, 5]
+        // Diverges at position 7 (the 8 vs 9), so ba < bc.
+        assert_eq!(
+            arena.compare_refs(IdentifierRef::new(ba, 5), IdentifierRef::new(bc, 5)),
+            Ordering::Less
         );
     }
 
@@ -558,51 +781,28 @@ mod tests {
     }
 
     #[test]
-    fn test_interval_containment() {
-        let mut arena = IdArena::new();
-        let outer = arena.intern(&[5]);
-        let inner = arena.intern(&[5, 3, 7]);
-        // outer interval [5]+[0..5), inner begin = [5,3,7]+[0] = [5,3,7,0]
-        // [5,0] < [5,3,7,0] < [5,4] → B2InsideB1
-        let r = arena.compare_intervals_raw(outer, 0, 5, inner, 0, 1);
-        assert!(matches!(r, IdOrderingRelation::B2InsideB1));
-    }
-
-    #[test]
     fn test_num_insertable() {
         let mut arena = IdArena::new();
         let base = arena.intern(&[5, 10]);
         let ins = IdentifierRef::new(base, 3);
         let nxt = IdentifierRef::new(base, 7);
-        assert_eq!(arena.num_insertable(ins, nxt, 100), 5); // 7+1-3
-    }
-
-    #[test]
-    fn test_compare_intervals_max_2_comparisons() {
-        // This test verifies the restructured logic handles all cases.
-        let mut arena = IdArena::new();
-        let a = arena.intern(&[10]);
-        let b = arena.intern(&[20]);
-        // let c = arena.intern(&[30]);
-
-        // a before b
-        assert!(matches!(
-            arena.compare_intervals_raw(a, 0, 5, b, 0, 5),
-            IdOrderingRelation::B1BeforeB2
-        ));
-        // b after a
-        assert!(matches!(
-            arena.compare_intervals_raw(b, 0, 5, a, 0, 5),
-            IdOrderingRelation::B1AfterB2
-        ));
+        assert_eq!(arena.num_insertable(ins, nxt, 100), 5);
     }
 
     /// Exhaustive cross-check against raw slice comparison.
     #[test]
     fn test_ref_comparison_exhaustive() {
         let paths: Vec<Vec<u32>> = vec![
-            vec![], vec![1], vec![1, 2], vec![1, 2, 3],
-            vec![1, 3], vec![2], vec![2, 1],
+            vec![],
+            vec![1],
+            vec![1, 2],
+            vec![1, 2, 3],
+            vec![1, 3],
+            vec![2],
+            vec![2, 1],
+            vec![1, 2, 3, 4, 5, 6, 7],     // exactly fills 1 chunk minus one
+            vec![1, 2, 3, 4, 5, 6, 7, 8],  // exactly fills 1 chunk
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9], // spills into chunk 2
         ];
         let extras = [0u32, 1, 5, 100];
 
@@ -624,6 +824,35 @@ mod tests {
                             pa, ea, pb, eb, expected, got);
                     }
                 }
+            }
+        }
+    }
+
+    /// Cross-check compare_ids exhaustively too.
+    #[test]
+    fn test_id_comparison_exhaustive() {
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![1], vec![2],
+            vec![1, 2], vec![1, 3], vec![2, 1],
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 10],
+            // Deep paths
+            (0..20).collect(),
+            (0..20).map(|i| if i == 18 { 999 } else { i }).collect(),
+        ];
+
+        let mut arena = IdArena::new();
+        let ids: Vec<Identifier> = paths.iter().map(|p| arena.intern(p)).collect();
+
+        for (i, pa) in paths.iter().enumerate() {
+            for (j, pb) in paths.iter().enumerate() {
+                let expected = pa.cmp(pb);
+                let got = arena.compare_ids(ids[i], ids[j]);
+                assert_eq!(got, expected,
+                    "compare_ids mismatch: {:?} vs {:?}: expected {:?}, got {:?}",
+                    pa, pb, expected, got);
             }
         }
     }
