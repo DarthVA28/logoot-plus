@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 
-use crate::idtrie::{IdentifierTrie, TrieId};
+use crate::idtrie::{IdArena, ArenaId};
 // use crate::identifier::Identifier;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12,7 +12,7 @@ pub enum OperationType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Operation { 
     pub op_type: OperationType,
-    pub ids: Vec<(TrieId, u32, u32)>,
+    pub ids: Vec<(ArenaId, u32, u32)>,
     pub payload: Option<String>,
     pub site: u32, 
     pub clock: u32
@@ -28,11 +28,11 @@ pub struct WireOperation {
 }
 
 impl Operation {
-    pub fn to_wire(&self, trie: &IdentifierTrie) -> WireOperation {
+    pub fn to_wire(&self, arena: &IdArena) -> WireOperation {
         WireOperation {
             op_type: self.op_type,
             ids: self.ids.iter()
-                .map(|(id, lo, hi)| (trie.get_path(*id), *lo, *hi))
+                .map(|(id, lo, hi)| (arena.get_path(*id).to_vec(), *lo, *hi))
                 .collect(),
             payload: self.payload.clone(),
             site: self.site,
@@ -40,19 +40,17 @@ impl Operation {
         }
     }
 
-    /// Convert from wire format, inserting paths into the local trie.
-    pub fn from_wire(wire: &WireOperation, trie: &mut IdentifierTrie) -> Self {
+    pub fn from_wire(wire: &WireOperation, arena: &mut IdArena) -> Self {
         Operation {
             op_type: wire.op_type,
             ids: wire.ids.iter()
-                .map(|(path, lo, hi)| (trie.insert_path(path), *lo, *hi))
+                .map(|(path, lo, hi)| (arena.intern(path), *lo, *hi))
                 .collect(),
             payload: wire.payload.clone(),
             site: wire.site,
             clock: wire.clock,
         }
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -66,7 +64,7 @@ pub struct OpLog {
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
     // pub pending: Vec<Operation>
-    pub pending: HashMap<TrieId, Vec<Operation>>
+    pub pending: HashMap<ArenaId, Vec<Operation>>
 }
 
 impl OpLog { 
@@ -87,11 +85,11 @@ impl OpLog {
 
     pub fn add_to_pending(&mut self, op: Operation) {
         // println!("Adding op {:?} to pending at site {}", op, op.site);
-        let id = op.ids.first().unwrap().0.clone();
+        let id = op.ids.first().unwrap().0;
         self.pending.entry(id).or_default().push(op);   
     }
 
-    pub fn get_pending_for_id(&mut self, id: &TrieId) -> Vec<Operation> {
+    pub fn get_pending_for_id(&mut self, id: &ArenaId) -> Vec<Operation> {
         self.pending.remove(id).unwrap_or_default()
     }
 
