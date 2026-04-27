@@ -1,8 +1,10 @@
 use core::panic;
+use std::cmp::Ordering;
 // use std::collections::HashMap;
 use ahash::AHashMap as HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
+// use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
+use crate::idtrie::{TrieId, TrieIdRef, IdentifierInterval, IdOrderingRelation, IdentifierTrie};
 use smallvec::SmallVec;
 
 pub type Path = SmallVec<[usize; 32]>;
@@ -12,7 +14,7 @@ pub struct Tree {
     pub nodes: Vec<Node>, 
     pub root: Option<usize>,
     free_list: Vec<usize>,
-    base_to_offsets: HashMap<Identifier, (u32, u32)>
+    base_to_offsets: HashMap<TrieId, (u32, u32)>
 }
 
 pub enum DelLocation {
@@ -87,8 +89,8 @@ impl Tree {
         self.nodes[node].creator
     }
 
-    pub fn node_base_id(&self, node: usize) -> &Identifier { 
-        &self.nodes[node].base_id
+    pub fn node_base_id(&self, node: usize) -> TrieId { 
+        self.nodes[node].base_id
     }
 
     pub fn node_ranges(&self, node: usize) -> (u32, u32) { 
@@ -100,7 +102,7 @@ impl Tree {
 
     pub fn node_base_offsets(&self, node: usize) -> (u32, u32) { 
         // Get the offsets from the map
-        let base_id = self.nodes[node].base_id.clone();
+        let base_id = self.nodes[node].base_id;
         if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             return (*lo, *hi)
         } else {
@@ -114,8 +116,8 @@ impl Tree {
         IdentifierInterval::new(base, offset, offset + self.nodes[node].size as u32)
     }
 
-    pub fn base_id_max_offset(&self, id: &Identifier) -> Option<u32> {
-        self.base_to_offsets.get(id).map(|(_, hi)| *hi)
+    pub fn base_id_max_offset(&self, id: TrieId) -> Option<u32> {
+        self.base_to_offsets.get(&id).map(|(_, hi)| *hi)
     }
 
     pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
@@ -124,7 +126,7 @@ impl Tree {
         let added_size = text.chars().count();
         node.size += added_size;
         // update the offsets of the base 
-        let base_id = node.base_id.clone();
+        let base_id = node.base_id;
         if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = hi + added_size as u32;
             self.base_to_offsets.insert(base_id, (*lo, new_hi));
@@ -364,12 +366,12 @@ impl Tree {
     }
 
     /// Insert the node by identifier  
-    pub fn insert_by_id(&mut self, site: u32, base: Id, offset: u32, content: String) {
-        let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
+    pub fn insert_by_id(&mut self, site: u32, id_trie: &IdentifierTrie, base: TrieId, offset: u32, content: String) {
+        let idx = self.alloca(Node::new(content.clone(), base, offset, site));
         let len = content.chars().count() as u32;
         if self.is_empty() {
             self.root = Some(idx);
-            if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
+            if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
                 // Modify the offsets accordingly
                 let new_hi = std::cmp::max(*hi, offset + len);
                 self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
@@ -382,9 +384,9 @@ impl Tree {
         let from = self.root.unwrap();
         let len = content.chars().count() as u32;
         let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
-        self.insert_rec(idx, insert_interval, from, content, site);
+        self.insert_rec(id_trie, idx, insert_interval, from, content, site);
         // Lookup in base to offsets map and modify the offsets accordingly
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
             // Modify the offsets accordingly
             let new_hi = std::cmp::max(*hi, offset + len);
             self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
@@ -393,21 +395,7 @@ impl Tree {
         }
     }
 
-    fn find_split_point(idi_short: &IdentifierInterval, id_long: &Id) -> u32 {
-        let mut sp = 0;
-        let text_len = idi_short.hi - idi_short.lo;
-        let id_long_slice = id_long.id.as_ref();
-        for i in 0..text_len {
-            let id_elem = IdentifierRef { base: idi_short.base.id.as_ref(), extra: idi_short.lo + i };
-            if id_elem.cmp_slice(id_long_slice) != std::cmp::Ordering::Less {
-                break;
-            }
-            sp += 1;
-        }
-        sp
-    }
-
-    pub fn insert_rec(&mut self, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
+    pub fn insert_rec(&mut self, id_trie: &IdentifierTrie, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
@@ -422,9 +410,9 @@ impl Tree {
 
             let relation = {
                 let n = &self.nodes[from];
-                compare_intervals_raw(
-                    &node_idi.base, node_idi.lo, node_idi.hi,
-                    &n.base_id, n.offset, n.offset + n.size as u32,
+                id_trie.compare_intervals_raw(
+                    node_idi.base, node_idi.lo, node_idi.hi,
+                    n.base_id, n.offset, n.offset + n.size as u32,
                 )
             }; // shared borrow of self.nodes[from] released here
 
@@ -451,8 +439,7 @@ impl Tree {
                     // Split the node and insert in the middle
                     // Find the split point 
                     let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content) = {
-                        let sp = Self::find_split_point(&self.node_get_identifier_interval(from), &node_idi.base);
-                        // println!("Splitting node {} at char offset {})", from, sp);
+                        let sp = id_trie.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
                         let from_content = &from_node.content;
                         // Find the byte position of the character offset 'sp'
@@ -519,9 +506,9 @@ impl Tree {
                         let r_base = self.node_base_id(r);
                         let r_offset = self.node_ranges(r).0;
                         let len = content.chars().count() as u32;
-                        let id_insert = IdentifierRef::new(&node_idi.base, node_idi.lo);
-                        let id_next = IdentifierRef::new(r_base, r_offset);
-                        let n_insertable = num_insertable(id_insert, id_next, len);
+                        let id_insert = TrieIdRef::new(node_idi.base, node_idi.lo);
+                        let id_next = TrieIdRef::new(r_base, r_offset);
+                        let n_insertable = id_trie.num_insertable(id_insert, id_next, len);
                         let from_node = &mut self.nodes[from];
                         if n_insertable < len {
                             // FIXME: just go right, don't bother splitting for now
@@ -547,16 +534,16 @@ impl Tree {
                     // Split the incoming node 
                     let b1 = &mut node_idi;
                     let sp = {
-                        let b2_base = &self.nodes[from].base_id;
-                        Self::find_split_point(&b1, b2_base)
+                        let b2_base = self.nodes[from].base_id;
+                        id_trie.find_split_point(&b1, b2_base)
                     }; 
 
                     let left_content: String = content.chars().take(sp as usize).collect();
                     let right_content: String = content.chars().skip(sp as usize).collect();
 
                     // Insert both recursively 
-                    self.insert_by_id(site, b1.base.clone(), b1.lo, left_content);
-                    self.insert_by_id(site, std::mem::take(&mut b1.base), b1.lo + sp, right_content);
+                    self.insert_by_id(site, id_trie, b1.base, b1.lo, left_content);
+                    self.insert_by_id(site, id_trie, b1.base, b1.lo + sp, right_content);
 
                     self.free(node);
 
@@ -601,12 +588,12 @@ impl Tree {
         self.rebalance(&path[..path.len()-1]);
     }
 
-    pub fn delete_by_id(&mut self, base: Id, offset: u32) -> Result<(), ()> {
+    pub fn delete_by_id(&mut self, id_trie: &IdentifierTrie, base: TrieId, offset: u32) -> Result<(), ()> {
         // let mut path: Vec<usize> = vec![];
         if self.is_empty() {
             return Err(())
         }
-        let path= self.find_by_id(base, offset);
+        let path= self.find_by_id(id_trie, base, offset);
         if path.is_empty() {
             return Err(());
         } 
@@ -655,7 +642,7 @@ impl Tree {
          Ok(())
     }
 
-    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Path {
+    pub fn find_by_id(&mut self, id_trie: &IdentifierTrie, base: TrieId, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -668,7 +655,7 @@ impl Tree {
             let b1 = &node_idi;
             let b2 = &self.node_get_identifier_interval(curr);
 
-            match compare_intervals(b1, &b2) {
+            match id_trie.compare_intervals(b1, &b2) {
                 IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
                     let from_node = &mut self.nodes[curr];
                     if let Some(r) = from_node.right {
@@ -695,7 +682,7 @@ impl Tree {
         return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Path {
+    pub fn find_by_id_exact(&mut self, id_trie: &IdentifierTrie, base: TrieId, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -708,7 +695,7 @@ impl Tree {
             let b1 = &node_idi;
             let b2 = &self.node_get_identifier_interval(curr);
 
-            match compare_intervals(b1, &b2) {
+            match id_trie.compare_intervals(b1, &b2) {
                 IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
@@ -859,16 +846,16 @@ impl Tree {
 
     /* Function to check whether all the keys in the tree are sorted or not */
     /// collect all the keys inorder and check if they are sorted
-    pub fn check_tree(&self) -> bool {
-        let mut prev_id: Option<Identifier> = None;
+    pub fn check_tree(&self, id_trie: &IdentifierTrie) -> bool {
+        let mut prev_id: Option<TrieId> = None;
         let mut prev_offsets: Option<(u32, u32)> = None;
         for node in self.inorder_iter() {
             let curr_id = node.base_id.clone();
             let (lo, hi) = (node.offset, node.offset + node.size as u32);
             if let Some(prev) = prev_id {
-                let curr_lo = IdentifierRef::new(&curr_id, lo);
-                let prev_hi = IdentifierRef::new(&prev, prev_offsets.unwrap().1-1);
-                if curr_lo <= prev_hi {
+                let curr_lo = TrieIdRef::new(curr_id, lo);
+                let prev_hi = TrieIdRef::new(prev, prev_offsets.unwrap().1-1);
+                if id_trie.compare_refs(curr_lo, prev_hi) != Ordering::Greater {
                     eprintln!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
                     return false;
                 }

@@ -1,19 +1,58 @@
 use std::collections::{HashSet, HashMap};
-use crate::identifier::Identifier;
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+use crate::idtrie::{IdentifierTrie, TrieId};
+// use crate::identifier::Identifier;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OperationType {
     Insert,
     Delete
 }   
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Operation { 
     pub op_type: OperationType,
-    pub ids: Vec<(Identifier, u32, u32)>,
+    pub ids: Vec<(TrieId, u32, u32)>,
     pub payload: Option<String>,
     pub site: u32, 
     pub clock: u32
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WireOperation {
+    pub op_type: OperationType,
+    pub ids: Vec<(Vec<u32>, u32, u32)>,
+    pub payload: Option<String>,
+    pub site: u32, 
+    pub clock: u32
+}
+
+impl Operation {
+    pub fn to_wire(&self, trie: &IdentifierTrie) -> WireOperation {
+        WireOperation {
+            op_type: self.op_type,
+            ids: self.ids.iter()
+                .map(|(id, lo, hi)| (trie.get_path(*id), *lo, *hi))
+                .collect(),
+            payload: self.payload.clone(),
+            site: self.site,
+            clock: self.clock,
+        }
+    }
+
+    /// Convert from wire format, inserting paths into the local trie.
+    pub fn from_wire(wire: &WireOperation, trie: &mut IdentifierTrie) -> Self {
+        Operation {
+            op_type: wire.op_type,
+            ids: wire.ids.iter()
+                .map(|(path, lo, hi)| (trie.insert_path(path), *lo, *hi))
+                .collect(),
+            payload: wire.payload.clone(),
+            site: wire.site,
+            clock: wire.clock,
+        }
+    }
+
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -27,7 +66,7 @@ pub struct OpLog {
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
     // pub pending: Vec<Operation>
-    pub pending: HashMap<Identifier, Vec<Operation>>
+    pub pending: HashMap<TrieId, Vec<Operation>>
 }
 
 impl OpLog { 
@@ -52,7 +91,7 @@ impl OpLog {
         self.pending.entry(id).or_default().push(op);   
     }
 
-    pub fn get_pending_for_id(&mut self, id: &Identifier) -> Vec<Operation> {
+    pub fn get_pending_for_id(&mut self, id: &TrieId) -> Vec<Operation> {
         self.pending.remove(id).unwrap_or_default()
     }
 

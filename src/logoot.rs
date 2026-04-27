@@ -1,5 +1,4 @@
 pub mod tree;
-pub mod identifier;
 pub mod node;
 pub mod operation;
 pub mod state;
@@ -7,6 +6,7 @@ pub mod wasm;
 pub mod document;
 pub mod network;
 pub mod trace_bench;
+pub mod idtrie;
 
 use document::Document;
 use network::Network;
@@ -369,14 +369,14 @@ mod b2_inside_b1_stress {
     use super::*;
     use rand::{SeedableRng, RngExt};
     use rand::rngs::StdRng;
-    use crate::operation::Operation;
+    use crate::operation::{WireOperation};
 
     /// A network where ops are queued and can be delivered in any order.
     /// This lets us specifically engineer child-before-parent scenarios.
     struct ManualNetwork {
         docs: Vec<Document>,
         /// pending[i] = ops queued for delivery to doc i, not yet applied
-        pending: Vec<Vec<Operation>>,
+        pending: Vec<Vec<WireOperation>>,
     }
 
     impl ManualNetwork {
@@ -387,7 +387,7 @@ mod b2_inside_b1_stress {
         }
 
         /// Perform a local insert on site `site`, queue the op for all others
-        fn ins(&mut self, site: usize, pos: usize, text: String) -> Operation {
+        fn ins(&mut self, site: usize, pos: usize, text: String) -> WireOperation {
             let op = self.docs[site].ins(pos, text).unwrap();
             for (i, q) in self.pending.iter_mut().enumerate() {
                 if i != site {
@@ -397,7 +397,7 @@ mod b2_inside_b1_stress {
             op
         }
 
-        fn del(&mut self, site: usize, from: usize, to: usize) -> Operation {
+        fn del(&mut self, site: usize, from: usize, to: usize) -> WireOperation {
             let op = self.docs[site].del(from, to);
             for (i, q) in self.pending.iter_mut().enumerate() {
                 if i != site {
@@ -411,7 +411,7 @@ mod b2_inside_b1_stress {
         fn deliver(&mut self, site: usize, op_idx: usize) {
             let op = self.pending[site].remove(op_idx);
             // println!("Delivering op from site {} to site {}: {:?}", op.site, site, op);
-            self.docs[site].apply_op(&op);
+            self.docs[site].apply_remote_op(&op);
         }
 
         /// Deliver all pending ops to all sites in a random order

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 
-use crate::operation::Operation;
+use crate::operation::{WireOperation};
 use crate::document::Document;
 
 #[derive(Clone, Debug)]
 pub struct Network {
     pub documents: Vec<Document>,
-    inboxes: Vec<HashMap<u32, Vec<Arc<Operation>>>>,
+    inboxes: Vec<HashMap<u32, Vec<Arc<WireOperation>>>>,
     site_index: HashMap<u32, usize>,
 }
 
@@ -32,7 +32,7 @@ impl Network {
         self.inboxes.push(HashMap::new());
     }
 
-    pub fn broadcast(&mut self, op: Operation, sender: u32) {
+    pub fn broadcast(&mut self, op: WireOperation, sender: u32) {
         let op = Arc::new(op);
         for (i, inbox) in self.inboxes.iter_mut().enumerate() {
             if self.documents[i].site_id() != sender {
@@ -50,7 +50,7 @@ impl Network {
             .remove(&from)
             .unwrap_or_default();
         for op in to_apply {
-            self.documents[idx].apply_op(&op);
+            self.documents[idx].apply_remote_op(&op);
         }
     }
 
