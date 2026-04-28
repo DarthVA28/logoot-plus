@@ -147,6 +147,14 @@ impl IdArena {
         self.get_slice(a).cmp(self.get_slice(b))
     }
 
+    #[inline(always)]
+    fn get_slice_unchecked(&self, id: Identifier) -> &[u32] {
+        debug_assert!(!id.is_empty());
+        unsafe {
+            self.data.get_unchecked(id.offset as usize..(id.offset as usize + id.len as usize))
+        }
+    }
+
     #[inline]
     pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
         // Fast path: same base → just compare extras
@@ -154,23 +162,26 @@ impl IdArena {
             return a.extra.cmp(&b.extra);
         }
 
-        let sa = self.get_slice(a.base);
-        let sb = self.get_slice(b.base);
+        let sa = self.get_slice_unchecked(a.base);
+        let sb = self.get_slice_unchecked(b.base);
 
-        let min_len = sa.len().min(sb.len());
+        let sa_len = sa.len();
+        let sb_len = sb.len();
 
-        // Compare the shared prefix.  LLVM will auto-vectorise this
-        // slice comparison on x86-64 with SSE2/AVX2.
-        match sa[..min_len].cmp(&sb[..min_len]) {
+        let min_len = sa_len.min(sb_len);
+
+        let sa_prefix = unsafe { sa.get_unchecked(..min_len) };
+        let sb_prefix = unsafe { sb.get_unchecked(..min_len) };
+        match sa_prefix.cmp(sb_prefix) {
             Ordering::Equal => {}
             ord => return ord,
         }
 
-        match sa.len().cmp(&sb.len()) {
+        match sa_len.cmp(&sb_len) {
             Ordering::Equal => a.extra.cmp(&b.extra),
             Ordering::Less => {
-                // a: extra at position min_len;  b: sb[min_len]
-                match a.extra.cmp(&sb[min_len]) {
+                let sb_at = unsafe { *sb.get_unchecked(min_len) };
+                match a.extra.cmp(&sb_at) {
                     Ordering::Equal => {
                         // a is shorter (min_len + 1 components) vs b has more
                         Ordering::Less
@@ -180,7 +191,8 @@ impl IdArena {
             }
             Ordering::Greater => {
                 // a: sa[min_len];  b: extra at position min_len
-                match sa[min_len].cmp(&b.extra) {
+                let sa_at = unsafe { *sa.get_unchecked(min_len) };
+                match sa_at.cmp(&b.extra) {
                     Ordering::Equal => {
                         // b is shorter
                         Ordering::Greater
