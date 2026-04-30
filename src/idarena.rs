@@ -9,51 +9,38 @@ pub const MIN_VALUE: u32 = 0;
 pub const MAX_VALUE: u32 = 100000;
 pub type Range = (u32, u32);
 
-/// Maximum binary-lifting levels. Supports trie depth up to 2^16 = 65 536.
-const LOG: usize = 16;
-/// The root node index – also doubles as the "empty" identifier.
+// Binary-lifting levels: supports trie depth up to 2^8 = 256.
+const LOG: usize = 8;
+// Trie root index.  Also serves as the "empty" identifier.
 const ROOT: u32 = 0;
+// Number of u32 path elements packed into the order key.
+const KEY_SLOTS: u32 = 4; // 4 × 32 = 128 bits = u128
 
-// ─── Identifier ──────────────────────────────────────────────────────────────
+// ─── Public types ────────────────────────────────────────────────────────────
 
-/// A lightweight handle into the trie.  Just a node index (4 bytes).
+/// Lightweight trie-node handle (4 bytes).
 #[derive(Clone, Copy, Debug)]
 pub struct Identifier(u32);
 
 impl Identifier {
-    /// The empty / document-boundary identifier (maps to the trie root).
     pub const EMPTY: Identifier = Identifier(ROOT);
-
     #[inline(always)]
-    pub fn is_empty(self) -> bool {
-        self.0 == ROOT
-    }
-
-    #[inline(always)]
-    pub(crate) fn idx(self) -> u32 {
-        self.0
-    }
+    pub fn is_empty(self) -> bool { self.0 == ROOT }
 }
 
 impl PartialEq for Identifier {
     #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
+    fn eq(&self, other: &Self) -> bool { self.0 == other.0 }
 }
 impl Eq for Identifier {}
 
 impl std::hash::Hash for Identifier {
     #[inline(always)]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.0.hash(state); }
 }
 
-// ─── IdentifierRef ───────────────────────────────────────────────────────────
-
-/// A reference = base path (trie node) + one trailing value.
-/// Conceptual path: path(base) ++ [extra].
+/// Reference = trie node + one trailing value.
+/// Conceptual path: `path(base) ++ [extra]`.
 #[derive(Clone, Copy, Debug)]
 pub struct IdentifierRef {
     pub base: Identifier,
@@ -62,18 +49,12 @@ pub struct IdentifierRef {
 
 impl IdentifierRef {
     #[inline(always)]
-    pub fn new(base: Identifier, extra: u32) -> Self {
-        IdentifierRef { base, extra }
-    }
-    pub fn doc_start() -> Self {
-        IdentifierRef { base: Identifier::EMPTY, extra: MIN_VALUE }
-    }
-    pub fn doc_end() -> Self {
-        IdentifierRef { base: Identifier::EMPTY, extra: MAX_VALUE }
-    }
+    pub fn new(base: Identifier, extra: u32) -> Self { Self { base, extra } }
+    #[inline(always)]
+    pub fn doc_start() -> Self { Self { base: Identifier::EMPTY, extra: MIN_VALUE } }
+    #[inline(always)]
+    pub fn doc_end() -> Self { Self { base: Identifier::EMPTY, extra: MAX_VALUE } }
 }
-
-// ─── IdentifierInterval ─────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug)]
 pub struct IdentifierInterval {
@@ -83,18 +64,13 @@ pub struct IdentifierInterval {
 }
 
 impl IdentifierInterval {
-    pub fn new(base: Identifier, lo: u32, hi: u32) -> Self {
-        IdentifierInterval { base, lo, hi }
-    }
-    pub fn id_begin(&self) -> IdentifierRef {
-        IdentifierRef::new(self.base, self.lo)
-    }
-    pub fn id_end(&self) -> IdentifierRef {
-        IdentifierRef::new(self.base, self.hi - 1)
-    }
+    #[inline(always)]
+    pub fn new(base: Identifier, lo: u32, hi: u32) -> Self { Self { base, lo, hi } }
+    #[inline(always)]
+    pub fn id_begin(&self) -> IdentifierRef { IdentifierRef::new(self.base, self.lo) }
+    #[inline(always)]
+    pub fn id_end(&self) -> IdentifierRef { IdentifierRef::new(self.base, self.hi - 1) }
 }
-
-// ─── Ordering relation ──────────────────────────────────────────────────────
 
 pub enum IdOrderingRelation {
     B1BeforeB2,
@@ -106,95 +82,117 @@ pub enum IdOrderingRelation {
     B1EqualsB2,
 }
 
-// ─── IdArena — prefix trie with binary lifting ──────────────────────────────
+// ─── Trie node ───────────────────────────────────────────────────────────────
+//
+// Exactly one cache line (64 bytes).  A single access to any field pulls the
+// full node into L1, so compare_refs that reads order_key and depth gets the
+// lifting table for free.
 
-/// Struct-of-arrays trie.  Each node is an index `0..node_count`.
-/// Node 0 is the root (depth 0, no value).
-#[derive(Clone, Debug)]
-pub struct IdArena {
-    /// Per-node value (root's value is unused).
-    values: Vec<u32>,
-    /// Parent index.
-    parents: Vec<u32>,
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+struct TrieNode {
+    /// First min(depth, 4) path values packed big-endian into a u128.
+    /// Position i occupies bits `(3-i)*32 .. (3-i)*32+31`.
+    /// Enables O(1) lexicographic comparison for paths with ≤ 4 elements.
+    order_key: u128, // 16 B
+    /// Binary-lifting table: `up[k]` = ancestor 2^k levels above.
+    up: [u32; LOG], // 32 B
+    /// This node's value in the trie.
+    value: u32, // 4 B
+    /// Parent node index.
+    parent: u32, // 4 B
     /// Depth in the trie (root = 0).
-    depths: Vec<u32>,
-    /// Flat binary-lifting table: `up[node * LOG + k]` = 2^k-th ancestor.
-    up: Vec<u32>,
-    /// Child lookup: key = `(parent as u64) << 32 | value`, value = child index.
+    depth: u32, // 4 B
+    _pad: u32,  // 4 B  →  total 64 B
+}
+
+// ─── IdArena ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct IdArena {
+    nodes: Vec<TrieNode>,
     children: HashMap<u64, u32>,
-    /// Total number of nodes (including root).
-    node_count: u32,
+}
+
+/// Pack `(parent_index, child_value)` into a single u64 hash-map key.
+#[inline(always)]
+fn child_key(parent: u32, value: u32) -> u64 {
+    (parent as u64) << 32 | value as u64
 }
 
 impl IdArena {
     pub fn new() -> Self {
-        let mut arena = IdArena {
-            values: Vec::with_capacity(4096),
-            parents: Vec::with_capacity(4096),
-            depths: Vec::with_capacity(4096),
-            up: Vec::with_capacity(4096 * LOG),
-            children: HashMap::with_capacity(4096),
-            node_count: 0,
+        let root = TrieNode {
+            order_key: 0,
+            up: [ROOT; LOG],
+            value: 0,
+            parent: ROOT,
+            depth: 0,
+            _pad: 0,
         };
-        // Allocate root (index 0).
-        arena.values.push(0);
-        arena.parents.push(ROOT);
-        arena.depths.push(0);
-        arena.up.extend(std::iter::repeat_n(ROOT, LOG));
-        arena.node_count = 1;
-        arena
+        let mut nodes = Vec::with_capacity(4096);
+        nodes.push(root);
+        IdArena {
+            nodes,
+            children: HashMap::with_capacity(4096),
+        }
     }
 
     pub fn clear(&mut self) {
-        self.values.truncate(1);
-        self.parents.truncate(1);
-        self.depths.truncate(1);
-        self.up.truncate(LOG);
+        self.nodes.truncate(1);
         self.children.clear();
-        self.node_count = 1;
+    }
+
+    // ── helpers ──────────────────────────────────────────────
+
+    #[inline(always)]
+    fn node(&self, idx: u32) -> &TrieNode {
+        unsafe { self.nodes.get_unchecked(idx as usize) }
     }
 
     // ── Node creation ────────────────────────────────────────
 
-    /// Insert a child node under `parent` with the given `value`.
-    /// Sets up the binary-lifting table for the new node.
     fn add_node(&mut self, parent: u32, value: u32) -> u32 {
-        let idx = self.node_count;
-        self.node_count += 1;
+        let idx = self.nodes.len() as u32;
 
-        let depth = unsafe { *self.depths.get_unchecked(parent as usize) } + 1;
-        self.values.push(value);
-        self.parents.push(parent);
-        self.depths.push(depth);
+        // Copy parent data before pushing (TrieNode is Copy).
+        let p = self.nodes[parent as usize];
+        let depth = p.depth + 1;
 
-        // Binary lifting: up[0] = parent
-        debug_assert_eq!(self.up.len(), idx as usize * LOG);
-        self.up.push(parent);
-        let base = idx as usize * LOG;
+        let order_key = if depth <= KEY_SLOTS {
+            p.order_key | ((value as u128) << ((KEY_SLOTS - depth) * 32))
+        } else {
+            p.order_key
+        };
+
+        let mut up = [ROOT; LOG];
+        up[0] = parent;
         for k in 1..LOG {
-            let prev = unsafe { *self.up.get_unchecked(base + k - 1) };
-            let anc = unsafe { *self.up.get_unchecked(prev as usize * LOG + k - 1) };
-            self.up.push(anc);
+            let anc = up[k - 1];
+            up[k] = self.nodes[anc as usize].up[k - 1];
         }
 
-        // Register child edge.
-        let key = (parent as u64) << 32 | value as u64;
-        self.children.insert(key, idx);
-
+        self.nodes.push(TrieNode {
+            order_key,
+            up,
+            value,
+            parent,
+            depth,
+            _pad: 0,
+        });
+        self.children.insert(child_key(parent, value), idx);
         idx
     }
 
     // ── Interning ────────────────────────────────────────────
 
-    /// Intern a path, deduplicating via the trie structure.
-    /// Returns the node at the end of the path.
     pub fn intern(&mut self, path: &[u32]) -> Identifier {
         if path.is_empty() {
             return Identifier::EMPTY;
         }
         let mut node = ROOT;
         for &val in path {
-            let key = (node as u64) << 32 | val as u64;
+            let key = child_key(node, val);
             node = match self.children.get(&key) {
                 Some(&child) => child,
                 None => self.add_node(node, val),
@@ -203,17 +201,15 @@ impl IdArena {
         Identifier(node)
     }
 
-    // ── Binary lifting primitives ────────────────────────────
+    // ── Binary lifting ──────────────────────────────────────
 
-    /// Lift `node` up to `target_depth`.
-    /// Pre: `target_depth <= depth(node)`.
     #[inline]
     fn lift(&self, mut node: u32, target_depth: u32) -> u32 {
-        let mut diff = unsafe { *self.depths.get_unchecked(node as usize) } - target_depth;
+        let mut diff = self.node(node).depth - target_depth;
         let mut k = 0usize;
         while diff > 0 {
             if diff & 1 != 0 {
-                node = unsafe { *self.up.get_unchecked(node as usize * LOG + k) };
+                node = self.node(node).up[k];
             }
             diff >>= 1;
             k += 1;
@@ -221,57 +217,132 @@ impl IdArena {
         node
     }
 
-    /// Lowest Common Ancestor.
     #[inline]
     fn lca(&self, mut a: u32, mut b: u32) -> u32 {
-        let da = unsafe { *self.depths.get_unchecked(a as usize) };
-        let db = unsafe { *self.depths.get_unchecked(b as usize) };
-
+        let da = self.node(a).depth;
+        let db = self.node(b).depth;
         if da > db {
             a = self.lift(a, db);
         } else if db > da {
             b = self.lift(b, da);
         }
-
         if a == b {
             return a;
         }
-
-        // Walk from highest bit downward.
         for k in (0..LOG).rev() {
-            let ua = unsafe { *self.up.get_unchecked(a as usize * LOG + k) };
-            let ub = unsafe { *self.up.get_unchecked(b as usize * LOG + k) };
+            let ua = self.node(a).up[k];
+            let ub = self.node(b).up[k];
             if ua != ub {
                 a = ua;
                 b = ub;
             }
         }
-
-        // Now a and b are children of the LCA.
-        unsafe { *self.up.get_unchecked(a as usize * LOG) }
+        self.node(a).up[0]
     }
 
     // ── Depth accessor ──────────────────────────────────────
 
-    /// Depth of an identifier in the trie (= path length).
     #[inline(always)]
     pub fn depth(&self, id: Identifier) -> u32 {
-        if id.is_empty() {
-            0
+        self.node(id.0).depth
+    }
+
+    // ── Order-key helpers ───────────────────────────────────
+
+    /// Build the packed order key for a full ref path.
+    /// Returns `(key, ref_depth)`.
+    #[inline(always)]
+    fn ref_key(&self, r: IdentifierRef) -> (u128, u32) {
+        if r.base.is_empty() {
+            return ((r.extra as u128) << 96, 1);
+        }
+        let n = self.node(r.base.0);
+        let d = n.depth;
+        if d < KEY_SLOTS {
+            let key = n.order_key | ((r.extra as u128) << ((KEY_SLOTS - 1 - d) * 32));
+            (key, d + 1)
         } else {
-            unsafe { *self.depths.get_unchecked(id.0 as usize) }
+            (n.order_key, d + 1)
         }
     }
 
-    // ── Comparisons ─────────────────────────────────────────
+    // ── compare_refs ────────────────────────────────────────
 
-    /// Compare two bare identifiers (path-only, no extra).
+    /// O(1) in the common case (ref paths ≤ 4 elements).
+    /// Falls back to O(log d) LCA for deeper paths.
+    #[inline]
+    pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
+        if a.base == b.base {
+            return a.extra.cmp(&b.extra);
+        }
+
+        let (ka, da) = self.ref_key(a);
+        let (kb, db) = self.ref_key(b);
+
+        match ka.cmp(&kb) {
+            Ordering::Equal => {
+                if da <= KEY_SLOTS && db <= KEY_SLOTS {
+                    // Both ref paths fully captured: shorter = less.
+                    da.cmp(&db)
+                } else {
+                    self.compare_refs_lca(a, b)
+                }
+            }
+            ord => ord,
+        }
+    }
+
+    #[cold]
+    fn compare_refs_lca(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
+        let an = a.base.0;
+        let bn = b.base.0;
+        let lca = self.lca(an, bn);
+
+        if lca == an {
+            let ad = self.node(an).depth;
+            let bc = self.lift(bn, ad + 1);
+            match a.extra.cmp(&self.node(bc).value) {
+                Ordering::Equal => Ordering::Less,
+                ord => ord,
+            }
+        } else if lca == bn {
+            let bd = self.node(bn).depth;
+            let ac = self.lift(an, bd + 1);
+            match self.node(ac).value.cmp(&b.extra) {
+                Ordering::Equal => Ordering::Greater,
+                ord => ord,
+            }
+        } else {
+            let ld = self.node(lca).depth;
+            let ac = self.lift(an, ld + 1);
+            let bc = self.lift(bn, ld + 1);
+            self.node(ac).value.cmp(&self.node(bc).value)
+        }
+    }
+
+    // ── compare_ids ─────────────────────────────────────────
+
     #[inline]
     pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
         if a == b {
             return Ordering::Equal;
         }
-        // EMPTY (ROOT) has depth 0 and is ancestor of everything.
+        let na = self.node(a.0);
+        let nb = self.node(b.0);
+        match na.order_key.cmp(&nb.order_key) {
+            Ordering::Equal => {
+                if na.depth <= KEY_SLOTS && nb.depth <= KEY_SLOTS {
+                    na.depth.cmp(&nb.depth)
+                } else {
+                    self.compare_ids_lca(a, b)
+                }
+            }
+            ord => ord,
+        }
+    }
+
+    #[cold]
+    fn compare_ids_lca(&self, a: Identifier, b: Identifier) -> Ordering {
         let lca = self.lca(a.0, b.0);
         if lca == a.0 {
             return Ordering::Less;
@@ -279,65 +350,13 @@ impl IdArena {
         if lca == b.0 {
             return Ordering::Greater;
         }
-        let lca_d = unsafe { *self.depths.get_unchecked(lca as usize) };
-        let ac = self.lift(a.0, lca_d + 1);
-        let bc = self.lift(b.0, lca_d + 1);
-        let va = unsafe { *self.values.get_unchecked(ac as usize) };
-        let vb = unsafe { *self.values.get_unchecked(bc as usize) };
-        va.cmp(&vb)
+        let ld = self.node(lca).depth;
+        let ac = self.lift(a.0, ld + 1);
+        let bc = self.lift(b.0, ld + 1);
+        self.node(ac).value.cmp(&self.node(bc).value)
     }
 
-    /// Compare two `IdentifierRef`s lexicographically.
-    ///
-    /// Conceptual comparison of `path(a.base) ++ [a.extra]`
-    /// vs `path(b.base) ++ [b.extra]`.
-    ///
-    /// O(log depth) via binary lifting.
-    #[inline]
-    pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
-        // Fast path: same base → just compare extras.
-        if a.base == b.base {
-            return a.extra.cmp(&b.extra);
-        }
-
-        let an = a.base.0;
-        let bn = b.base.0;
-
-        let lca = self.lca(an, bn);
-
-        if lca == an {
-            // a.base is a strict ancestor of b.base.
-            // They match up to depth(a.base).  Next element:
-            //   a → a.extra
-            //   b → value at depth(a.base) + 1
-            let a_d = unsafe { *self.depths.get_unchecked(an as usize) };
-            let bc = self.lift(bn, a_d + 1);
-            let bv = unsafe { *self.values.get_unchecked(bc as usize) };
-            match a.extra.cmp(&bv) {
-                Ordering::Equal => Ordering::Less, // a is shorter → a < b
-                ord => ord,
-            }
-        } else if lca == bn {
-            // b.base is a strict ancestor of a.base (mirror).
-            let b_d = unsafe { *self.depths.get_unchecked(bn as usize) };
-            let ac = self.lift(an, b_d + 1);
-            let av = unsafe { *self.values.get_unchecked(ac as usize) };
-            match av.cmp(&b.extra) {
-                Ordering::Equal => Ordering::Greater, // b is shorter → a > b
-                ord => ord,
-            }
-        } else {
-            // Paths diverge below LCA.
-            let lca_d = unsafe { *self.depths.get_unchecked(lca as usize) };
-            let ac = self.lift(an, lca_d + 1);
-            let bc = self.lift(bn, lca_d + 1);
-            let av = unsafe { *self.values.get_unchecked(ac as usize) };
-            let bv = unsafe { *self.values.get_unchecked(bc as usize) };
-            av.cmp(&bv) // can never be Equal for distinct children
-        }
-    }
-
-    // ── Interval comparisons ─────────────────────────────────
+    // ── Interval comparisons ────────────────────────────────
 
     #[inline(always)]
     pub fn compare_intervals_raw(
@@ -349,7 +368,6 @@ impl IdArena {
         b2_lo: u32,
         b2_hi: u32,
     ) -> IdOrderingRelation {
-        // Fast path: same base → pure offset arithmetic.
         if b1_base == b2_base {
             if b1_lo == b2_lo && b1_hi == b2_hi {
                 return IdOrderingRelation::B1EqualsB2;
@@ -409,16 +427,14 @@ impl IdArena {
         id_next: IdentifierRef,
         length: u32,
     ) -> u32 {
-        let ins_d = self.depth(id_insert.base);
-        let nxt_d = self.depth(id_next.base);
+        let ins_d = self.node(id_insert.base.0).depth;
+        let nxt_d = self.node(id_next.base.0).depth;
 
-        // insert's base path must be strictly shorter than next's full path.
         if ins_d > nxt_d {
             return length;
         }
 
-        // Check prefix: insert.base must be an ancestor of next.base
-        // (or ROOT if ins_d == 0, which is always an ancestor).
+        // Ancestor check: insert.base must be an ancestor of next.base.
         if ins_d > 0 {
             let lifted = self.lift(id_next.base.0, ins_d);
             if lifted != id_insert.base.0 {
@@ -426,12 +442,8 @@ impl IdArena {
             }
         }
 
-        // Paths match up to ins_d.  Get the value at position ins_d in
-        // next's full path:  if ins_d < nxt_d it's a trie value,
-        //                    if ins_d == nxt_d it's next.extra.
         let next_at = if ins_d < nxt_d {
-            let node = self.lift(id_next.base.0, ins_d + 1);
-            unsafe { *self.values.get_unchecked(node as usize) }
+            self.node(self.lift(id_next.base.0, ins_d + 1)).value
         } else {
             id_next.extra
         };
@@ -456,40 +468,29 @@ impl IdArena {
 
         let sn = idi_short.base.0;
         let ln = id_long.0;
-        let s_d = unsafe { *self.depths.get_unchecked(sn as usize) };
-        let l_d = unsafe { *self.depths.get_unchecked(ln as usize) };
+        let s_d = self.node(sn).depth;
+        let l_d = self.node(ln).depth;
 
         let lca = self.lca(sn, ln);
 
         if lca == sn {
-            // short.base is an ancestor of (or equal to) long.
             if s_d >= l_d {
                 return 0;
             }
-            // Strict ancestor: get pivot value at depth s_d + 1 on long's path.
-            let pivot_node = self.lift(ln, s_d + 1);
-            let pivot = unsafe { *self.values.get_unchecked(pivot_node as usize) };
+            let pivot = self.node(self.lift(ln, s_d + 1)).value;
             let extras_below = if l_d > s_d + 1 {
-                // long continues past the pivot → refs with extra ≤ pivot
-                // are all strictly before long.
                 pivot.saturating_add(1).saturating_sub(idi_short.lo)
             } else {
-                // long ends right at the pivot → ref with extra == pivot
-                // has the same full path as long (equal, not less).
                 pivot.saturating_sub(idi_short.lo)
             };
             extras_below.min(text_len)
         } else if lca == ln {
-            // long is an ancestor of short → short > long.
             0
         } else {
-            // Paths diverge.
-            let lca_d = unsafe { *self.depths.get_unchecked(lca as usize) };
-            let sc = self.lift(sn, lca_d + 1);
-            let lc = self.lift(ln, lca_d + 1);
-            let sv = unsafe { *self.values.get_unchecked(sc as usize) };
-            let lv = unsafe { *self.values.get_unchecked(lc as usize) };
-            if sv < lv {
+            let ld = self.node(lca).depth;
+            let sc = self.lift(sn, ld + 1);
+            let lc = self.lift(ln, ld + 1);
+            if self.node(sc).value < self.node(lc).value {
                 text_len
             } else {
                 0
@@ -499,39 +500,27 @@ impl IdArena {
 
     // ── Path extraction ─────────────────────────────────────
 
-    /// Reconstruct the full path (owned).
-    /// Walk from the node to root, then reverse.
-    pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
-        if id.is_empty() {
-            return Vec::new();
-        }
-        let d = unsafe { *self.depths.get_unchecked(id.0 as usize) } as usize;
-        let mut path = Vec::with_capacity(d);
-        let mut node = id.0;
-        for _ in 0..d {
-            path.push(unsafe { *self.values.get_unchecked(node as usize) });
-            node = unsafe { *self.parents.get_unchecked(node as usize) };
-        }
-        path.reverse();
-        path
-    }
-
-    /// Fill a caller-provided buffer with the path (avoids allocation
-    /// in hot loops like `generate_base`).
     #[inline]
     fn fill_path(&self, id: Identifier, buf: &mut Vec<u32>) {
         buf.clear();
         if id.is_empty() {
             return;
         }
-        let d = unsafe { *self.depths.get_unchecked(id.0 as usize) } as usize;
+        let d = self.node(id.0).depth as usize;
         buf.reserve(d);
-        let mut node = id.0;
+        let mut n = id.0;
         for _ in 0..d {
-            buf.push(unsafe { *self.values.get_unchecked(node as usize) });
-            node = unsafe { *self.parents.get_unchecked(node as usize) };
+            let nd = self.node(n);
+            buf.push(nd.value);
+            n = nd.parent;
         }
         buf.reverse();
+    }
+
+    pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
+        let mut buf = Vec::new();
+        self.fill_path(id, &mut buf);
+        buf
     }
 
     // ── Display / diagnostics ───────────────────────────────
@@ -545,11 +534,19 @@ impl IdArena {
     }
 
     pub fn node_count(&self) -> usize {
-        self.node_count as usize
+        self.nodes.len()
     }
 
     pub fn arena_size(&self) -> usize {
-        self.values.len() + self.up.len()
+        self.nodes.len() * std::mem::size_of::<TrieNode>()
+    }
+}
+
+impl std::fmt::Debug for IdArena {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdArena")
+            .field("node_count", &self.nodes.len())
+            .finish()
     }
 }
 
@@ -561,7 +558,6 @@ pub fn generate_base(
     id_high: IdentifierRef,
     state: &mut State,
 ) -> Identifier {
-    // Materialise the full ref paths once (O(depth)).
     let mut low_buf: Vec<u32> = Vec::new();
     let mut high_buf: Vec<u32> = Vec::new();
     arena.fill_path(id_low.base, &mut low_buf);
