@@ -32,7 +32,7 @@ impl Operation {
         WireOperation {
             op_type: self.op_type,
             ids: self.ids.iter()
-                .map(|(id, lo, hi)| (arena.get_path(*id).to_vec(), *lo, *hi))
+                .map(|(id, lo, hi)| (arena.get_path_owned(*id), *lo, *hi))
                 .collect(),
             payload: self.payload.clone(),
             site: self.site,
