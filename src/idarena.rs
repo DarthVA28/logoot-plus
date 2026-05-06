@@ -155,7 +155,7 @@ impl IdArena {
         }
     }
 
-    #[inline]
+    // #[inline]
     pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
         // Fast path: same base → just compare extras
         if a.base.offset == b.base.offset {
@@ -203,13 +203,13 @@ impl IdArena {
         }
     }
 
-    #[inline(always)]
+    // #[inline(always)]
     pub fn compare_intervals_raw(
         &self,
         b1_base: Identifier, b1_lo: u32, b1_hi: u32,
         b2_base: Identifier, b2_lo: u32, b2_hi: u32,
     ) -> IdOrderingRelation {
-        // Fast path: same base → pure offset arithmetic, no comparison needed
+        // Fast path: same base pure offset arithmetic, no comparison needed
         if b1_base == b2_base {
             if b1_lo == b2_lo && b1_hi == b2_hi {
                 return IdOrderingRelation::B1EqualsB2;
@@ -258,7 +258,7 @@ impl IdArena {
         }
     }
 
-    #[inline(always)]
+    // #[inline(always)]
     pub fn compare_intervals(&self, b1: &IdentifierInterval, b2: &IdentifierInterval) -> IdOrderingRelation {
         self.compare_intervals_raw(b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi)
     }

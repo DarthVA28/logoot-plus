@@ -692,7 +692,7 @@ impl Tree {
         if self.is_empty() {
             return Path::new();
         }
-        let node_idi = IdentifierInterval::new(base.clone(), offset, offset + 1);
+        let node_idi = IdentifierInterval::new(base, offset, offset + 1);
         let mut curr = self.root.unwrap();
 
         loop {
