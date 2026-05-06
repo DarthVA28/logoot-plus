@@ -371,7 +371,7 @@ impl Tree {
     }
 
     /// Insert the node by identifier  
-    pub fn insert_by_id(&mut self, site: u32, id_arena: &IdArena, base: Identifier, offset: u32, content: String) {
+    pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, base: Identifier, offset: u32, content: String) {
         let idx = self.alloca(Node::new(content.clone(), base, offset, site));
         let len = content.chars().count() as u32;
         if self.is_empty() {
@@ -400,7 +400,7 @@ impl Tree {
         }
     }
 
-    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
+    pub fn insert_rec(&mut self, id_arena: &mut IdArena, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
@@ -593,7 +593,7 @@ impl Tree {
         self.rebalance(&path[..path.len()-1]);
     }
 
-    pub fn delete_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Result<(), ()> {
+    pub fn delete_by_id(&mut self, id_arena: &mut IdArena, base: Identifier, offset: u32) -> Result<(), ()> {
         // let mut path: Vec<usize> = vec![];
         if self.is_empty() {
             return Err(())
@@ -647,7 +647,7 @@ impl Tree {
          Ok(())
     }
 
-    pub fn find_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
+    pub fn find_by_id(&mut self, id_arena: &mut IdArena, base: Identifier, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -687,7 +687,7 @@ impl Tree {
         return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
+    pub fn find_by_id_exact(&mut self, id_arena: &mut IdArena, base: Identifier, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -851,7 +851,7 @@ impl Tree {
 
     /* Function to check whether all the keys in the tree are sorted or not */
     /// collect all the keys inorder and check if they are sorted
-    pub fn check_tree(&self, id_arena: &IdArena) -> bool {
+    pub fn check_tree(&self, id_arena: &mut IdArena) -> bool {
         let mut prev_id: Option<Identifier> = None;
         let mut prev_offsets: Option<(u32, u32)> = None;
         for node in self.inorder_iter() {

@@ -7,6 +7,7 @@ pub mod document;
 pub mod network;
 pub mod trace_bench;
 pub mod idarena;
+// pub mod cmp_profiler;
 
 use document::Document;
 use network::Network;

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+// use logoot_plus::cmp_profiler;
 use logoot_plus::trace_bench::{
     ContentCheck, RssStats, TimingStats, TraceStats, generate_operations_for_targets_with_checks,
     load_trace_file, measure_merge_rss, merge_remote_cpu_timed_once, reload_from_disk_cpu_once,
@@ -271,6 +272,7 @@ fn main() {
     }
 
     println!("wrote benchmark summary to {}", config.output.display());
+    // cmp_profiler::report();
 }
 
 fn parse_args(args: Vec<String>) -> Result<Config, String> {
