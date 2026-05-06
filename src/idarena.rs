@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use ahash::AHashMap as HashMap;
-use crate::state::State;
+use crate::{state::State};
 use rand::RngExt;
 
 pub const MIN_VALUE: u32 = 0;
@@ -72,6 +72,42 @@ pub enum IdOrderingRelation {
     B1EqualsB2,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum BaseRelation {
+    Diverged(Ordering),
+    Equal,
+    /// b1's base is a proper prefix of b2's base.
+    /// `discriminant` = b2_base[b1_base.len()] — the value b1's extra
+    /// is compared against.
+    B1Prefix { discriminant: u32 },
+    B2Prefix { discriminant: u32 },
+}
+
+impl BaseRelation {
+    #[inline(always)]
+    fn compare(self, b1_extra: u32, b2_extra: u32) -> Ordering {
+        match self {
+            BaseRelation::Diverged(ord) => ord,
+
+            BaseRelation::Equal => b1_extra.cmp(&b2_extra),
+
+            BaseRelation::B1Prefix { discriminant } => {
+                match b1_extra.cmp(&discriminant) {
+                    Ordering::Equal => Ordering::Less,
+                    ord => ord,
+                }
+            }
+
+            BaseRelation::B2Prefix { discriminant } => {
+                match discriminant.cmp(&b2_extra) {
+                    Ordering::Equal => Ordering::Greater,
+                    ord => ord,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct IdArena {
     data: Vec<u32>,
@@ -91,18 +127,12 @@ impl IdArena {
         self.dedup.clear();
     }
 
-    // ── Interning ────────────────────────────────────────────
-
-    /// Intern a path, returning a deduplicated `ArenaId`.
-    /// If this exact path was previously interned, returns the same
-    /// `ArenaId` (same offset).
     pub fn intern(&mut self, path: &[u32]) -> Identifier {
         if path.is_empty() { return Identifier::EMPTY; }
 
         let hash = self.hash_slice(path);
         let len = path.len() as u32;
 
-        // Check for existing entry with same hash
         if let Some(candidates) = self.dedup.get(&hash) {
             for &(offset, cand_len) in candidates {
                 if cand_len == len {
@@ -114,7 +144,6 @@ impl IdArena {
             }
         }
 
-        // Not found — append to arena
         let offset = self.data.len() as u32;
         self.data.extend_from_slice(path);
         self.dedup.entry(hash).or_default().push((offset, len));
@@ -129,22 +158,10 @@ impl IdArena {
         hasher.finish()
     }
 
-    // ── Slice access ─────────────────────────────────────────
-
-    /// Get the path components for an `ArenaId`.
-    /// This is an O(1) slice lookup — no allocation, no copying.
     #[inline(always)]
     pub fn get_slice(&self, id: Identifier) -> &[u32] {
         if id.is_empty() { return &[]; }
         &self.data[id.offset as usize..(id.offset as usize + id.len as usize)]
-    }
-
-    // ── Comparison ───────────────────────────────────────────
-
-    #[inline]
-    pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
-        if a.offset == b.offset { return Ordering::Equal; }
-        self.get_slice(a).cmp(self.get_slice(b))
     }
 
     #[inline(always)]
@@ -155,61 +172,62 @@ impl IdArena {
         }
     }
 
-    // #[inline]
-    pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
-        // Fast path: same base → just compare extras
-        if a.base.offset == b.base.offset {
-            return a.extra.cmp(&b.extra);
+    #[inline]
+    fn base_relation(&self, b1: Identifier, b2: Identifier) -> BaseRelation {
+        // Same interned identity → Equal (fast path)
+        if b1.offset == b2.offset {
+            return BaseRelation::Equal;
         }
 
-        let sa = self.get_slice_unchecked(a.base);
-        let sb = self.get_slice_unchecked(b.base);
-
+        let sa = self.get_slice_unchecked(b1);
+        let sb = self.get_slice_unchecked(b2);
         let sa_len = sa.len();
         let sb_len = sb.len();
-
         let min_len = sa_len.min(sb_len);
 
         let sa_prefix = unsafe { sa.get_unchecked(..min_len) };
         let sb_prefix = unsafe { sb.get_unchecked(..min_len) };
+
         match sa_prefix.cmp(sb_prefix) {
             Ordering::Equal => {}
-            ord => return ord,
+            ord => return BaseRelation::Diverged(ord),
         }
 
         match sa_len.cmp(&sb_len) {
-            Ordering::Equal => a.extra.cmp(&b.extra),
-            Ordering::Less => {
-                let sb_at = unsafe { *sb.get_unchecked(min_len) };
-                match a.extra.cmp(&sb_at) {
-                    Ordering::Equal => {
-                        // a is shorter (min_len + 1 components) vs b has more
-                        Ordering::Less
-                    }
-                    ord => ord,
-                }
+            Ordering::Equal => {
+                // Same content, different offsets (shouldn't happen with
+                // proper interning, but handle gracefully).
+                BaseRelation::Equal
             }
-            Ordering::Greater => {
-                // a: sa[min_len];  b: extra at position min_len
-                let sa_at = unsafe { *sa.get_unchecked(min_len) };
-                match sa_at.cmp(&b.extra) {
-                    Ordering::Equal => {
-                        // b is shorter
-                        Ordering::Greater
-                    }
-                    ord => ord,
-                }
-            }
+            Ordering::Less => BaseRelation::B1Prefix {
+                discriminant: unsafe { *sb.get_unchecked(min_len) },
+            },
+            Ordering::Greater => BaseRelation::B2Prefix {
+                discriminant: unsafe { *sa.get_unchecked(min_len) },
+            },
         }
     }
 
-    // #[inline(always)]
+    #[inline]
+    pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
+        if a.offset == b.offset { return Ordering::Equal; }
+        self.get_slice(a).cmp(self.get_slice(b))
+    }
+
+    #[inline]
+    pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
+        if a.base.offset == b.base.offset {
+            return a.extra.cmp(&b.extra);
+        }
+        self.base_relation(a.base, b.base).compare(a.extra, b.extra)
+    }
+
     pub fn compare_intervals_raw(
         &self,
         b1_base: Identifier, b1_lo: u32, b1_hi: u32,
         b2_base: Identifier, b2_lo: u32, b2_hi: u32,
     ) -> IdOrderingRelation {
-        // Fast path: same base pure offset arithmetic, no comparison needed
+        // Fast path: same base → pure offset arithmetic
         if b1_base == b2_base {
             if b1_lo == b2_lo && b1_hi == b2_hi {
                 return IdOrderingRelation::B1EqualsB2;
@@ -228,37 +246,36 @@ impl IdArena {
             }
         }
 
-        let b1_begin = IdentifierRef::new(b1_base, b1_lo);
-        let b2_begin = IdentifierRef::new(b2_base, b2_lo);
+        let rel = self.base_relation(b1_base, b2_base);
 
-        match self.compare_refs(b1_begin, b2_begin) {
+        match rel.compare(b1_lo, b2_lo) {
             Ordering::Less => {
-                // b1 starts before b2.  Check if b2_begin < b1_end (containment).
-                let b1_end = IdentifierRef::new(b1_base, b1_hi - 1);
-                if self.compare_refs(b2_begin, b1_end) == Ordering::Less {
+                // b1 starts before b2.
+                // Containment check: is b1_end > b2_begin?
+                //   b1_end   = (b1_base, b1_hi - 1)
+                //   b2_begin = (b2_base, b2_lo)
+                // rel.compare gives ordering of (b1_base, x) vs (b2_base, y).
+                if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
                     IdOrderingRelation::B2InsideB1
                 } else {
                     IdOrderingRelation::B1BeforeB2
                 }
             }
             Ordering::Greater => {
-                // b2 starts before b1.  Check if b1_begin < b2_end (containment).
-                let b2_end = IdentifierRef::new(b2_base, b2_hi - 1);
-                if self.compare_refs(b1_begin, b2_end) == Ordering::Less {
+                if rel.compare(b1_lo, b2_hi - 1) == Ordering::Less {
                     IdOrderingRelation::B1InsideB2
                 } else {
                     IdOrderingRelation::B1AfterB2
                 }
             }
             Ordering::Equal => {
-                // Same begin but different bases — shouldn't happen in
-                // well-formed LogootSplit, but handle gracefully.
+                // Same begin position but different bases — shouldn't
+                // happen in well-formed LogootSplit, but handle gracefully.
                 IdOrderingRelation::B1BeforeB2
             }
         }
     }
 
-    // #[inline(always)]
     pub fn compare_intervals(&self, b1: &IdentifierInterval, b2: &IdentifierInterval) -> IdOrderingRelation {
         self.compare_intervals_raw(b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi)
     }
@@ -272,7 +289,6 @@ impl IdArena {
 
         if l >= next_slice.len() + 1 { return length; }
 
-        // Check: insert's base must be a prefix of next's full path
         let next_full_iter = next_slice.iter().chain(std::iter::once(&id_next.extra));
         for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
             if a != b { return length; }
@@ -292,40 +308,32 @@ impl IdArena {
         let short_slice = self.get_slice(idi_short.base);
         let min_len = short_slice.len().min(long_slice.len());
 
-        // Compare the shared prefix once, outside the binary search.
         match short_slice[..min_len].cmp(&long_slice[..min_len]) {
-            Ordering::Less => {
-                return text_len;
-            }
-            Ordering::Greater => {
-                return 0;
-            }
+            Ordering::Less  => return text_len,
+            Ordering::Greater => return 0,
             Ordering::Equal => {}
         }
 
-        // Prefixes match. Now ordering depends on what comes after position min_len.
         if short_slice.len() < long_slice.len() {
             let pivot = long_slice[min_len];
             let extras_below = if long_slice.len() > min_len + 1 {
                 pivot.saturating_add(1).saturating_sub(idi_short.lo)
             } else {
-                // ref < long whenever extra < pivot
                 pivot.saturating_sub(idi_short.lo)
             };
             return extras_below.min(text_len);
-        } else if short_slice.len() == long_slice.len() {
-            return 0;
         } else {
             return 0;
         }
     }
+
+    // ── Accessors ────────────────────────────────────────────
 
     #[inline(always)]
     pub fn get_path(&self, id: Identifier) -> &[u32] {
         self.get_slice(id)
     }
 
-    /// Get the full path as an owned Vec (for serialisation).
     pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
         self.get_slice(id).to_vec()
     }
