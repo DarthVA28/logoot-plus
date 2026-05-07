@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering};
 use ahash::AHashMap as HashMap;
 use crate::{state::State};
 use rand::RngExt;
@@ -127,21 +127,23 @@ impl IdArena {
         self.dedup.clear();
     }
 
-    pub fn intern(&mut self, path: &[u32]) -> Identifier {
+    pub fn intern(&mut self, path: &[u32], is_new: bool) -> Identifier {
         if path.is_empty() { return Identifier::EMPTY; }
 
         let hash = self.hash_slice(path);
         let len = path.len() as u32;
-
-        if let Some(candidates) = self.dedup.get(&hash) {
-            for &(offset, cand_len) in candidates {
-                if cand_len == len {
-                    // let stored = &self.data[offset as usize..(offset as usize + len as usize)];
-                    let stored = unsafe {
-                        self.data.get_unchecked(offset as usize..(offset as usize + len as usize))
-                    };
-                    if stored == path {
-                        return Identifier { offset, len };
+        
+        if !is_new {
+            if let Some(candidates) = self.dedup.get(&hash) {
+                for &(offset, cand_len) in candidates {
+                    if cand_len == len {
+                        // let stored = &self.data[offset as usize..(offset as usize + len as usize)];
+                        let stored = unsafe {
+                            self.data.get_unchecked(offset as usize..(offset as usize + len as usize))
+                        };
+                        if stored == path {
+                            return Identifier { offset, len };
+                        }
                     }
                 }
             }
@@ -388,8 +390,9 @@ pub fn generate_base(
 
     let nxt = state.rng.random_range(l + 1..h);
     new_path.push(nxt);
-    new_path.push(state.replica);
-    new_path.push(state.local_clock);
+    // new_path.push(state.replica);
+    // new_path.push(state.local_clock);
+    new_path.push(state.replica + state.local_clock*100);
 
-    arena.intern(&new_path)
+    arena.intern(&new_path, true)
 }

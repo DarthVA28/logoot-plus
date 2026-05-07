@@ -44,7 +44,7 @@ impl Operation {
         Operation {
             op_type: wire.op_type,
             ids: wire.ids.iter()
-                .map(|(path, lo, hi)| (arena.intern(path), *lo, *hi))
+                .map(|(path, lo, hi)| (arena.intern(path, false), *lo, *hi))
                 .collect(),
             payload: wire.payload.clone(),
             site: wire.site,

@@ -98,10 +98,6 @@ impl Document {
     }
 
     pub fn apply_op(&mut self, op: &Operation) {
-        // FIXME : For idempotence this should be there. But can abstract at a higher level  
-        // if self.oplog.is_recorded(&op) {
-        //     return;
-        // }
         // We are ready to apply this operation, first record it in the oplog and then apply it
         match op.op_type {
             OperationType::Insert => {

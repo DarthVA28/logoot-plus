@@ -140,30 +140,6 @@ impl Tree {
         }
     }
 
-    // pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
-    //     let node = &mut self.nodes[node];
-    //     let content_len = node.content.chars().count();
-    //     match location {
-    //         DelLocation::Start => {
-    //             let new_content: String = node.content.chars().skip(num_delete as usize).collect();
-    //             node.content = new_content;
-    //         }
-    //         DelLocation::End => {
-    //             let new_content: String = node.content.chars().take(content_len - num_delete).collect();
-    //             node.content = new_content;
-    //         }
-    //     }
-    //     node.size -= num_delete as usize;
-    //     // update offsets 
-    //     node.offset = match location {
-    //         DelLocation::Start => node.offset + num_delete as u32,
-    //         DelLocation::End => node.offset
-    //     };
-    //     for idx in path_to_root.iter().rev() {
-    //         self.update_node(*idx);
-    //     }
-    // }
-
     pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
         let n = &mut self.nodes[node];
         match location {
@@ -280,6 +256,7 @@ impl Tree {
                     self.nodes[idx].right = Some(curr);
                 }
             }
+            
             let old_h = self.nodes[idx].height;
             curr = self.avl_fix(idx);
             if curr == idx && self.nodes[idx].height == old_h {

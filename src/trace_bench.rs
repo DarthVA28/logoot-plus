@@ -247,8 +247,8 @@ pub fn merge_remote_cpu_timed_once(
     generated: &GeneratedTrace,
     target: usize,
 ) -> Result<(u128, ContentCheck), String> {
-    let start = Instant::now();
     let mut doc = build_local_state(generated, target)?;
+    let start = Instant::now();
     for op in &generated.remote_ops[target] {
         doc.apply_remote_op(op);
     }
