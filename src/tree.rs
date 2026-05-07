@@ -735,8 +735,254 @@ impl Tree {
             }
         }
     }
+}
 
+/* Direct positional insert/delete — bypasses find_by_id entirely */
+impl Tree {
 
+    // ── helpers for base_to_offsets bookkeeping ──────────────────────────
+
+    /// Register (or widen) the offset range for a base identifier.
+    fn register_base_offsets(&mut self, base: Identifier, offset: u32, size: u32) {
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
+            let new_lo = std::cmp::min(*lo, offset);
+            let new_hi = std::cmp::max(*hi, offset + size);
+            self.base_to_offsets.insert(base, (new_lo, new_hi));
+        } else {
+            self.base_to_offsets.insert(base, (offset, offset + size));
+        }
+    }
+
+    // ── positional inserts ──────────────────────────────────────────────
+
+    /// Insert `node` as the in-order successor of `path.last()`.
+    ///
+    /// Use when you know the new node belongs immediately after the node
+    /// at the end of the path (e.g. inserting at the end of a block).
+    pub fn insert_after(&mut self, path: &[usize], node: Node) -> usize {
+        let new_idx = self.alloca(node);
+        let n = &self.nodes[new_idx];
+        self.register_base_offsets(n.base_id, n.offset, n.size as u32);
+
+        let target = *path.last().unwrap();
+        let mut extended_path: Path = Path::from_slice(path);
+
+        if self.nodes[target].right.is_none() {
+            self.nodes[target].right = Some(new_idx);
+        } else {
+            // Walk to the leftmost node in the right subtree.
+            let mut curr = self.nodes[target].right.unwrap();
+            extended_path.push(curr);
+            while let Some(l) = self.nodes[curr].left {
+                curr = l;
+                extended_path.push(curr);
+            }
+            self.nodes[curr].left = Some(new_idx);
+        }
+
+        self.rebalance(&extended_path);
+        new_idx
+    }
+
+    /// Insert `node` as the in-order predecessor of `path.last()`.
+    ///
+    /// Use when the new node belongs immediately before the node
+    /// at the end of the path (e.g. inserting at the start of a block).
+    pub fn insert_before(&mut self, path: &[usize], node: Node) -> usize {
+        let new_idx = self.alloca(node);
+        let n = &self.nodes[new_idx];
+        self.register_base_offsets(n.base_id, n.offset, n.size as u32);
+
+        let target = *path.last().unwrap();
+        let mut extended_path: Path = Path::from_slice(path);
+
+        if self.nodes[target].left.is_none() {
+            self.nodes[target].left = Some(new_idx);
+        } else {
+            // Walk to the rightmost node in the left subtree.
+            let mut curr = self.nodes[target].left.unwrap();
+            extended_path.push(curr);
+            while let Some(r) = self.nodes[curr].right {
+                curr = r;
+                extended_path.push(curr);
+            }
+            self.nodes[curr].right = Some(new_idx);
+        }
+
+        self.rebalance(&extended_path);
+        new_idx
+    }
+
+    pub fn split_and_insert_middle(
+        &mut self,
+        path: &[usize],
+        sp: usize,         
+        middle: Node,
+    ) -> usize {
+        let target = *path.last().unwrap();
+
+        // ── 1. Extract data from target ─────────────────────────────────
+        let base_id = self.nodes[target].base_id;
+        let offset  = self.nodes[target].offset;
+        let creator = self.nodes[target].creator;
+        let original_right = self.nodes[target].right;
+
+        // Take ownership of content to split it.
+        let content = std::mem::take(&mut self.nodes[target].content);
+        let byte_idx = content
+            .char_indices()
+            .nth(sp)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let left_content  = content[..byte_idx].to_string();
+        let right_content = content[byte_idx..].to_string();
+
+        // ── 2. Update target to be the left half ────────────────────────
+        let left_size = sp;
+        self.nodes[target].content = left_content;
+        self.nodes[target].size = left_size;
+        // target keeps its base_id, offset, creator, and LEFT child.
+
+        // ── 3. Allocate right half ──────────────────────────────────────
+        let right_node = Node::new(
+            right_content,
+            base_id,
+            offset + sp as u32,
+            creator,
+        );
+        let right_idx = self.alloca(right_node);
+        // Right half inherits target's original right subtree.
+        self.nodes[right_idx].right = original_right;
+
+        // ── 4. Allocate middle node ─────────────────────────────────────
+        let middle_base   = middle.base_id;
+        let middle_offset = middle.offset;
+        let middle_size   = middle.size as u32;
+        let middle_idx = self.alloca(middle);
+        self.register_base_offsets(middle_base, middle_offset, middle_size);
+
+        // ── 5. Wire up ─────────────────────────────────────────────────
+        // middle is the left child of right_half (it comes between left and right
+        // in in-order). target's right is now right_half.
+        self.nodes[right_idx].left = Some(middle_idx);
+        self.nodes[target].right   = Some(right_idx);
+
+        // ── 6. Rebalance from the deepest new node up to root ───────────
+        let mut extended_path: Path = Path::from_slice(path);
+        extended_path.push(right_idx);
+        extended_path.push(middle_idx);
+        self.rebalance(&extended_path);
+
+        middle_idx
+    }
+
+    // ── positional deletes ──────────────────────────────────────────────
+
+    /// Delete the node at `path.last()` using the path directly.
+    ///
+    /// This is the same algorithm as delete_by_id's second half, but skips
+    /// the find_by_id traversal since we already have the path.
+    pub fn delete_at_path(&mut self, path: &[usize]) {
+        if path.is_empty() {
+            return;
+        }
+        let curr = *path.last().unwrap();
+        let left  = self.nodes[curr].left;
+        let right = self.nodes[curr].right;
+
+        match (left, right) {
+            (None, None) => {
+                self.splice(path, curr, None);
+            }
+            (Some(child), None) | (None, Some(child)) => {
+                self.splice(path, curr, Some(child));
+            }
+            (Some(_), Some(r)) => {
+                // Two children: replace with in-order successor, then delete successor.
+                let mut succ_path: Path = Path::from_slice(path);
+                succ_path.push(r);
+                let mut succ = r;
+                while let Some(l) = self.nodes[succ].left {
+                    succ = l;
+                    succ_path.push(succ);
+                }
+
+                // Copy successor's payload into target.
+                let succ_data = self.nodes[succ].clone();
+                let tn = &mut self.nodes[curr];
+                tn.content = succ_data.content;
+                tn.base_id = succ_data.base_id;
+                tn.offset  = succ_data.offset;
+                tn.size    = succ_data.size;
+                tn.creator = succ_data.creator;
+
+                // Delete successor (which has at most one child — the right one).
+                let succ_right = self.nodes[succ].right;
+                self.splice(&succ_path, succ, succ_right);
+            }
+        }
+    }
+
+    /// Delete characters `[start..start+count)` from the node at `path.last()`,
+    /// splitting the remaining content into two nodes.
+    ///
+    /// Before:   target("ABCDE", off=0),  start=1, count=2
+    /// After:    target("A", off=0) ── right_half("DE", off=3)
+    ///
+    /// This replaces the old delete_and_split which did delete_by_id + 2× insert_by_id.
+    pub fn delete_middle_at_path(
+        &mut self,
+        path: &[usize],
+        start: usize,   // char offset within the node where deletion begins
+        count: usize,    // number of chars to delete
+    ) {
+        let target = *path.last().unwrap();
+        let base_id = self.nodes[target].base_id;
+        let offset  = self.nodes[target].offset;
+        let creator = self.nodes[target].creator;
+        let original_right = self.nodes[target].right;
+
+        // Split content into left and right, discarding the middle.
+        let content = std::mem::take(&mut self.nodes[target].content);
+        let chars: Vec<char> = content.chars().collect();
+        let left_content:  String = chars[..start].iter().collect();
+        let right_content: String = chars[start + count..].iter().collect();
+
+        // ── Update target to be the left portion ────────────────────────
+        self.nodes[target].content = left_content;
+        self.nodes[target].size = start;
+        // target keeps its offset unchanged.
+
+        // ── Create right portion ────────────────────────────────────────
+        let right_node = Node::new(
+            right_content,
+            base_id,
+            offset + (start + count) as u32,
+            creator,
+        );
+        let right_idx = self.alloca(right_node);
+
+        // Right portion inherits target's original right subtree.
+        self.nodes[right_idx].right = original_right;
+        self.nodes[target].right = Some(right_idx);
+
+        // ── Rebalance ───────────────────────────────────────────────────
+        let mut extended_path: Path = Path::from_slice(path);
+        extended_path.push(right_idx);
+        self.rebalance(&extended_path);
+    }
+
+    // ── first-node insert (empty tree or single root) ───────────────────
+
+    /// Insert a node into an empty tree, returning its index.
+    /// Caller is responsible for generating the base ID.
+    pub fn insert_first(&mut self, node: Node) -> usize {
+        let idx = self.alloca(node);
+        let n = &self.nodes[idx];
+        self.register_base_offsets(n.base_id, n.offset, n.size as u32);
+        self.root = Some(idx);
+        idx
+    }
 }
 
 pub struct InOrderIter<'a> {

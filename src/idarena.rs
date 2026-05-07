@@ -136,7 +136,10 @@ impl IdArena {
         if let Some(candidates) = self.dedup.get(&hash) {
             for &(offset, cand_len) in candidates {
                 if cand_len == len {
-                    let stored = &self.data[offset as usize..(offset as usize + len as usize)];
+                    // let stored = &self.data[offset as usize..(offset as usize + len as usize)];
+                    let stored = unsafe {
+                        self.data.get_unchecked(offset as usize..(offset as usize + len as usize))
+                    };
                     if stored == path {
                         return Identifier { offset, len };
                     }
@@ -211,7 +214,8 @@ impl IdArena {
     #[inline]
     pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
         if a.offset == b.offset { return Ordering::Equal; }
-        self.get_slice(a).cmp(self.get_slice(b))
+        self.get_slice_unchecked(a).cmp(self.get_slice_unchecked(b))
+        // self.get_slice(a).cmp(self.get_slice(b))
     }
 
     #[inline]
@@ -283,8 +287,11 @@ impl IdArena {
     // ── num_insertable ───────────────────────────────────────
 
     pub fn num_insertable(&self, id_insert: IdentifierRef, id_next: IdentifierRef, length: u32) -> u32 {
-        let insert_slice = self.get_slice(id_insert.base);
-        let next_slice = self.get_slice(id_next.base);
+        // let insert_slice = self.get_slice(id_insert.base);
+        // let next_slice = self.get_slice(id_next.base);
+        let insert_slice = self.get_slice_unchecked(id_insert.base);
+        let next_slice = self.get_slice_unchecked(id_next.base);
+
         let l = insert_slice.len();
 
         if l >= next_slice.len() + 1 { return length; }
@@ -304,18 +311,24 @@ impl IdArena {
         let text_len = idi_short.hi - idi_short.lo;
         if text_len == 0 { return 0; }
 
-        let long_slice = self.get_slice(id_long);
-        let short_slice = self.get_slice(idi_short.base);
+        // let long_slice = self.get_slice(id_long);
+        // let short_slice = self.get_slice(idi_short.base);
+        let long_slice = self.get_slice_unchecked(id_long);
+        let short_slice = self.get_slice_unchecked(idi_short.base);
+
         let min_len = short_slice.len().min(long_slice.len());
 
-        match short_slice[..min_len].cmp(&long_slice[..min_len]) {
+        let short_prefix = unsafe { short_slice.get_unchecked(..min_len) };
+        let long_prefix = unsafe { long_slice.get_unchecked(..min_len) };
+        match short_prefix.cmp(long_prefix) {
             Ordering::Less  => return text_len,
             Ordering::Greater => return 0,
             Ordering::Equal => {}
         }
 
         if short_slice.len() < long_slice.len() {
-            let pivot = long_slice[min_len];
+            // let pivot = long_slice[min_len];
+            let pivot = unsafe { *long_slice.get_unchecked(min_len) };
             let extras_below = if long_slice.len() > min_len + 1 {
                 pivot.saturating_add(1).saturating_sub(idi_short.lo)
             } else {
