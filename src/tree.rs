@@ -140,29 +140,57 @@ impl Tree {
         }
     }
 
+    // pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
+    //     let node = &mut self.nodes[node];
+    //     let content_len = node.content.chars().count();
+    //     match location {
+    //         DelLocation::Start => {
+    //             let new_content: String = node.content.chars().skip(num_delete as usize).collect();
+    //             node.content = new_content;
+    //         }
+    //         DelLocation::End => {
+    //             let new_content: String = node.content.chars().take(content_len - num_delete).collect();
+    //             node.content = new_content;
+    //         }
+    //     }
+    //     node.size -= num_delete as usize;
+    //     // update offsets 
+    //     node.offset = match location {
+    //         DelLocation::Start => node.offset + num_delete as u32,
+    //         DelLocation::End => node.offset
+    //     };
+    //     for idx in path_to_root.iter().rev() {
+    //         self.update_node(*idx);
+    //     }
+    // }
+
     pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
-        let node = &mut self.nodes[node];
-        let content_len = node.content.chars().count();
+        let n = &mut self.nodes[node];
         match location {
             DelLocation::Start => {
-                let new_content: String = node.content.chars().skip(num_delete as usize).collect();
-                node.content = new_content;
+                let byte_off = n.content.char_indices()
+                    .nth(num_delete)
+                    .map(|(i, _)| i)
+                    .unwrap_or(n.content.len());
+                let kept = n.content.split_off(byte_off);
+                n.content = kept;
+                n.offset += num_delete as u32;
             }
             DelLocation::End => {
-                let new_content: String = node.content.chars().take(content_len - num_delete).collect();
-                node.content = new_content;
+                let keep_chars = n.size - num_delete;
+                let byte_off = n.content.char_indices()
+                    .nth(keep_chars)
+                    .map(|(i, _)| i)
+                    .unwrap_or(n.content.len());
+                n.content.truncate(byte_off); // truncate in-place, no allocation
             }
         }
-        node.size -= num_delete as usize;
-        // update offsets 
-        node.offset = match location {
-            DelLocation::Start => node.offset + num_delete as u32,
-            DelLocation::End => node.offset
-        };
+        n.size -= num_delete;
         for idx in path_to_root.iter().rev() {
             self.update_node(*idx);
         }
     }
+
 }
 
 /* Rotation and Rebalancing Functions */
@@ -387,7 +415,6 @@ impl Tree {
             return;
         }
         let from = self.root.unwrap();
-        let len = content.chars().count() as u32;
         let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
         self.insert_rec(id_arena, idx, insert_interval, from, content, site);
         // Lookup in base to offsets map and modify the offsets accordingly
@@ -737,12 +764,8 @@ impl Tree {
     }
 }
 
-/* Direct positional insert/delete — bypasses find_by_id entirely */
 impl Tree {
-
-    // ── helpers for base_to_offsets bookkeeping ──────────────────────────
-
-    /// Register (or widen) the offset range for a base identifier.
+    #[inline(always)]
     fn register_base_offsets(&mut self, base: Identifier, offset: u32, size: u32) {
         if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
             let new_lo = std::cmp::min(*lo, offset);
@@ -752,13 +775,6 @@ impl Tree {
             self.base_to_offsets.insert(base, (offset, offset + size));
         }
     }
-
-    // ── positional inserts ──────────────────────────────────────────────
-
-    /// Insert `node` as the in-order successor of `path.last()`.
-    ///
-    /// Use when you know the new node belongs immediately after the node
-    /// at the end of the path (e.g. inserting at the end of a block).
     pub fn insert_after(&mut self, path: &[usize], node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
@@ -784,10 +800,6 @@ impl Tree {
         new_idx
     }
 
-    /// Insert `node` as the in-order predecessor of `path.last()`.
-    ///
-    /// Use when the new node belongs immediately before the node
-    /// at the end of the path (e.g. inserting at the start of a block).
     pub fn insert_before(&mut self, path: &[usize], node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
@@ -821,13 +833,11 @@ impl Tree {
     ) -> usize {
         let target = *path.last().unwrap();
 
-        // ── 1. Extract data from target ─────────────────────────────────
         let base_id = self.nodes[target].base_id;
         let offset  = self.nodes[target].offset;
         let creator = self.nodes[target].creator;
         let original_right = self.nodes[target].right;
 
-        // Take ownership of content to split it.
         let content = std::mem::take(&mut self.nodes[target].content);
         let byte_idx = content
             .char_indices()
@@ -876,10 +886,7 @@ impl Tree {
         middle_idx
     }
 
-    // ── positional deletes ──────────────────────────────────────────────
-
     /// Delete the node at `path.last()` using the path directly.
-    ///
     /// This is the same algorithm as delete_by_id's second half, but skips
     /// the find_by_id traversal since we already have the path.
     pub fn delete_at_path(&mut self, path: &[usize]) {
@@ -908,33 +915,32 @@ impl Tree {
                 }
 
                 // Copy successor's payload into target.
-                let succ_data = self.nodes[succ].clone();
-                let tn = &mut self.nodes[curr];
-                tn.content = succ_data.content;
-                tn.base_id = succ_data.base_id;
-                tn.offset  = succ_data.offset;
-                tn.size    = succ_data.size;
-                tn.creator = succ_data.creator;
+                // let succ_data = self.nodes[succ].clone();
+                let succ_content = std::mem::take(&mut self.nodes[succ].content);
+                let succ_base    = self.nodes[succ].base_id;
+                let succ_offset  = self.nodes[succ].offset;
+                let succ_size    = self.nodes[succ].size;
+                let succ_creator = self.nodes[succ].creator;
 
-                // Delete successor (which has at most one child — the right one).
+                let tn = &mut self.nodes[curr];
+                tn.content = succ_content;
+                tn.base_id = succ_base;
+                tn.offset  = succ_offset;
+                tn.size    = succ_size;
+                tn.creator = succ_creator;
+
+                // Delete successor 
                 let succ_right = self.nodes[succ].right;
                 self.splice(&succ_path, succ, succ_right);
             }
         }
     }
 
-    /// Delete characters `[start..start+count)` from the node at `path.last()`,
-    /// splitting the remaining content into two nodes.
-    ///
-    /// Before:   target("ABCDE", off=0),  start=1, count=2
-    /// After:    target("A", off=0) ── right_half("DE", off=3)
-    ///
-    /// This replaces the old delete_and_split which did delete_by_id + 2× insert_by_id.
     pub fn delete_middle_at_path(
         &mut self,
         path: &[usize],
-        start: usize,   // char offset within the node where deletion begins
-        count: usize,    // number of chars to delete
+        start: usize,
+        count: usize,
     ) {
         let target = *path.last().unwrap();
         let base_id = self.nodes[target].base_id;
@@ -942,18 +948,23 @@ impl Tree {
         let creator = self.nodes[target].creator;
         let original_right = self.nodes[target].right;
 
-        // Split content into left and right, discarding the middle.
         let content = std::mem::take(&mut self.nodes[target].content);
-        let chars: Vec<char> = content.chars().collect();
-        let left_content:  String = chars[..start].iter().collect();
-        let right_content: String = chars[start + count..].iter().collect();
 
-        // ── Update target to be the left portion ────────────────────────
+        // Find the two byte boundaries with a single pass
+        let mut indices = content.char_indices();
+        let left_byte = indices.nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let mid_byte = indices.nth(count - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+
+        let left_content  = content[..left_byte].to_string();
+        let right_content = content[mid_byte..].to_string();
+
         self.nodes[target].content = left_content;
         self.nodes[target].size = start;
-        // target keeps its offset unchanged.
 
-        // ── Create right portion ────────────────────────────────────────
         let right_node = Node::new(
             right_content,
             base_id,
@@ -962,20 +973,14 @@ impl Tree {
         );
         let right_idx = self.alloca(right_node);
 
-        // Right portion inherits target's original right subtree.
         self.nodes[right_idx].right = original_right;
         self.nodes[target].right = Some(right_idx);
 
-        // ── Rebalance ───────────────────────────────────────────────────
         let mut extended_path: Path = Path::from_slice(path);
         extended_path.push(right_idx);
         self.rebalance(&extended_path);
     }
 
-    // ── first-node insert (empty tree or single root) ───────────────────
-
-    /// Insert a node into an empty tree, returning its index.
-    /// Caller is responsible for generating the base ID.
     pub fn insert_first(&mut self, node: Node) -> usize {
         let idx = self.alloca(node);
         let n = &self.nodes[idx];

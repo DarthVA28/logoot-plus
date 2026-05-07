@@ -508,7 +508,7 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
                 panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, start + processed, doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
             }
             let block: usize = *path.last().unwrap();
-            let base_id = doc.blocks.node_base_id(block);
+            // let base_id = doc.blocks.node_base_id(block);
             let block_ranges = doc.blocks.node_ranges(block);
             let block_size = block_ranges.1 - block_ranges.0;
             let offset = start + processed;
@@ -518,10 +518,11 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             // Same 4 cases as local delete
             if offset == block_ranges.0 && n_in_block >= block_size {
                 // Case 1: delete the entire block 
-                let res = doc.blocks.delete_by_id(&doc.id_trie,base_id.clone(), block_ranges.0);
-                if res.is_err() {
-                    panic!("Error deleting block during remote delete");
-                }
+                doc.blocks.delete_at_path(&path);
+                // let res = doc.blocks.delete_by_id(&doc.id_trie,base_id.clone(), block_ranges.0);
+                // if res.is_err() {
+                //     panic!("Error deleting block during remote delete");
+                // }
             } else if offset == block_ranges.0 {
                 doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::Start, &path);
             } else if offset + n_in_block as u32 >= block_ranges.1 {
