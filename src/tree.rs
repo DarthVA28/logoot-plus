@@ -280,7 +280,21 @@ impl Tree {
                     self.nodes[idx].right = Some(curr);
                 }
             }
+            let old_h = self.nodes[idx].height;
             curr = self.avl_fix(idx);
+            if curr == idx && self.nodes[idx].height == old_h {
+                for j in (0..i).rev() {
+                    self.update_node(path_to_root[j]);
+                }
+                if i > 0 { 
+                    self.root = Some(path_to_root[0]); 
+                }
+                else { 
+                    self.root = Some(curr); 
+                }
+            return;
+        }
+
         }
         self.root = Some(curr);
     }
