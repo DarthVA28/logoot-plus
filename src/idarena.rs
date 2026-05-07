@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use ahash::AHashMap as HashMap;
-use crate::{state::State};
+use crate::state::State;
 use rand::RngExt;
 
 pub const MIN_VALUE: u32 = 0;
@@ -9,11 +9,26 @@ pub type Range = (u32, u32);
 
 const EMPTY_OFFSET: u32 = u32::MAX;
 
+/// Only engage the cache when the first DEPTH_THRESHOLD elements of
+/// both bases match.  Divergences shallower than this are cheap enough
+/// to redo every time.  Tune to taste: 6 means ~45% of comparisons
+/// (depth 0-5) skip the cache entirely.
+const DEPTH_THRESHOLD: usize = 6;
+
+/// Direct-mapped cache: 2^CACHE_BITS entries, ~32 KB at 16 B/entry.
+/// Fits comfortably in L1.  Collisions silently evict — correctness
+/// never depends on a hit.
+const CACHE_BITS: usize = 11;
+const CACHE_SIZE: usize = 1 << CACHE_BITS;
+const CACHE_MASK: usize = CACHE_SIZE - 1;
+
+// ── Identifier types ─────────────────────────────────────
+
 #[derive(Clone, Copy, Debug)]
 pub struct Identifier {
     offset: u32,
     len: u32,
-    extends: Option<u32>
+    extends: Option<u32>,
 }
 
 impl Identifier {
@@ -27,7 +42,7 @@ impl Identifier {
 
     pub fn set_extends(&mut self, base: Identifier) {
         self.extends = Some(base.offset);
-    }   
+    }
 }
 
 impl PartialEq for Identifier {
@@ -77,13 +92,12 @@ pub enum IdOrderingRelation {
     B1EqualsB2,
 }
 
+// ── BaseRelation ─────────────────────────────────────────
+
 #[derive(Clone, Copy, Debug)]
 enum BaseRelation {
     Diverged(Ordering),
     Equal,
-    /// b1's base is a proper prefix of b2's base.
-    /// `discriminant` = b2_base[b1_base.len()] — the value b1's extra
-    /// is compared against.
     B1Prefix { discriminant: u32 },
     B2Prefix { discriminant: u32 },
 }
@@ -93,16 +107,13 @@ impl BaseRelation {
     fn compare(self, b1_extra: u32, b2_extra: u32) -> Ordering {
         match self {
             BaseRelation::Diverged(ord) => ord,
-
             BaseRelation::Equal => b1_extra.cmp(&b2_extra),
-
             BaseRelation::B1Prefix { discriminant } => {
                 match b1_extra.cmp(&discriminant) {
                     Ordering::Equal => Ordering::Less,
                     ord => ord,
                 }
             }
-
             BaseRelation::B2Prefix { discriminant } => {
                 match discriminant.cmp(&b2_extra) {
                     Ordering::Equal => Ordering::Greater,
@@ -111,37 +122,95 @@ impl BaseRelation {
             }
         }
     }
-}
 
-#[derive(Clone, Debug)]
-pub struct IdCmpCache {
-    cache: HashMap<(u32, u32), BaseRelation>
-}
-
-impl IdCmpCache {
-    fn store(&mut self, a: u32, b: u32, ord: BaseRelation) {
-        // FIXME: For now insert both relations into the cache 
-        // (a,b) and (b,a) this is simple but doubles memory usage.
-        // We can optimize by only storing one direction and flipping the relation on lookup.
-        self.cache.insert((a, b), ord);
-        self.cache.insert((b,a), match ord {
+    #[inline(always)]
+    fn flip(self) -> BaseRelation {
+        match self {
             BaseRelation::Diverged(ord) => BaseRelation::Diverged(ord.reverse()),
             BaseRelation::Equal => BaseRelation::Equal,
             BaseRelation::B1Prefix { discriminant } => BaseRelation::B2Prefix { discriminant },
             BaseRelation::B2Prefix { discriminant } => BaseRelation::B1Prefix { discriminant },
-        });
-    }
-
-    fn lookup(&self, a: u32, b: u32) -> Option<&BaseRelation> {
-        self.cache.get(&(a, b))
+        }
     }
 }
+
+// ── Flat direct-mapped cache ─────────────────────────────
+
+/// A single cache slot.  Keys are stored in canonical order
+/// (lo ≤ hi) so that (a,b) and (b,a) share the same slot.
+#[derive(Clone, Copy, Debug)]
+struct CacheEntry {
+    key_lo: u32,
+    key_hi: u32,
+    relation: BaseRelation, // stored in (lo, hi) direction
+}
+
+impl CacheEntry {
+    const EMPTY: CacheEntry = CacheEntry {
+        key_lo: u32::MAX,
+        key_hi: u32::MAX,
+        relation: BaseRelation::Equal,
+    };
+}
+
+#[derive(Clone, Debug)]
+struct RelationCache {
+    entries: Box<[CacheEntry; CACHE_SIZE]>,
+}
+
+impl RelationCache {
+    fn new() -> Self {
+        RelationCache {
+            entries: Box::new([CacheEntry::EMPTY; CACHE_SIZE]),
+        }
+    }
+
+    #[inline(always)]
+    fn index(lo: u32, hi: u32) -> usize {
+        let h = (lo as usize).wrapping_mul(0x9E3779B9) ^ (hi as usize).wrapping_mul(0x517CC1B7);
+        h & CACHE_MASK
+    }
+
+    /// Look up, returning the relation in (a, b) direction.
+    #[inline(always)]
+    fn lookup(&self, a: u32, b: u32) -> Option<BaseRelation> {
+        let (lo, hi, flipped) = if a <= b { (a, b, false) } else { (b, a, true) };
+        let idx = Self::index(lo, hi);
+        let entry = unsafe { self.entries.get_unchecked(idx) };
+        if entry.key_lo == lo && entry.key_hi == hi {
+            Some(if flipped { entry.relation.flip() } else { entry.relation })
+        } else {
+            None
+        }
+    }
+
+    /// Store, canonicalising keys so (a,b) and (b,a) share one slot.
+    #[inline(always)]
+    fn store(&mut self, a: u32, b: u32, rel: BaseRelation) {
+        let (lo, hi, canonical_rel) = if a <= b {
+            (a, b, rel)
+        } else {
+            (b, a, rel.flip())
+        };
+        let idx = Self::index(lo, hi);
+        let entry = unsafe { self.entries.get_unchecked_mut(idx) };
+        entry.key_lo = lo;
+        entry.key_hi = hi;
+        entry.relation = canonical_rel;
+    }
+
+    fn clear(&mut self) {
+        self.entries.fill(CacheEntry::EMPTY);
+    }
+}
+
+// ── Arena ────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct IdArena {
     data: Vec<u32>,
     dedup: HashMap<u64, smallvec::SmallVec<[(u32, u32); 1]>>,
-    id_cmp_cache: IdCmpCache,
+    rel_cache: RelationCache,
 }
 
 impl IdArena {
@@ -149,13 +218,14 @@ impl IdArena {
         IdArena {
             data: Vec::with_capacity(4096),
             dedup: HashMap::with_capacity(1024),
-            id_cmp_cache: IdCmpCache { cache: HashMap::with_capacity(4096) },
+            rel_cache: RelationCache::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.data.clear();
         self.dedup.clear();
+        self.rel_cache.clear();
     }
 
     pub fn intern(&mut self, path: &[u32]) -> Identifier {
@@ -203,45 +273,40 @@ impl IdArena {
         }
     }
 
-    // ── Base relation ────────────────────────────────────────
+    // ── Extends shortcut ─────────────────────────────────
 
-    /// Compare two base slices once and return a reusable descriptor.
-    /// Callers can then resolve any number of `(base, extra)` pairs
-    /// against each other without re-walking the slices.
+    #[inline(always)]
+    fn try_extends_shortcut(&self, b1: Identifier, b2: Identifier) -> Option<BaseRelation> {
+        if let Some(orig) = b1.extends {
+            if orig == b2.offset {
+                let discriminant = unsafe {
+                    *self.data.get_unchecked(b1.offset as usize + b2.len as usize)
+                };
+                return Some(BaseRelation::B2Prefix { discriminant });
+            }
+        }
+        if let Some(orig) = b2.extends {
+            if orig == b1.offset {
+                let discriminant = unsafe {
+                    *self.data.get_unchecked(b2.offset as usize + b1.len as usize)
+                };
+                return Some(BaseRelation::B1Prefix { discriminant });
+            }
+        }
+        None
+    }
+
+    // ── Base relation with threshold + flat cache ────────
+
     #[inline]
     fn base_relation(&mut self, b1: Identifier, b2: Identifier) -> BaseRelation {
-        // Same interned identity → Equal (fast path)
         if b1.offset == b2.offset {
             return BaseRelation::Equal;
         }
 
-        // Check cache for previously computed relation
-        if let Some(cached) = self.id_cmp_cache.lookup(b1.offset, b2.offset) {
-            // println!("Cache hit for comparing {:?} and {:?}: {:?}", b1, b2, cached);
-            return *cached;
-        }
-
-        // It is possible that the new identifier extends an existing one, see if we can get a relation from that 
-        if let Some(orig) = b1.extends {
-            // Check the cache for the relation between the original identifier and b2
-            if let Some(cached) = self.id_cmp_cache.lookup(orig, b2.offset) {
-                // If we find a cached relation, we can try to use it to infer the relation between b1 and b2
-                let inferred = match cached {
-                    BaseRelation::Diverged(ord) => Some(BaseRelation::Diverged(*ord)),
-                    BaseRelation::Equal => Some(BaseRelation::B2Prefix { discriminant: b2.len }),
-                    BaseRelation::B2Prefix { discriminant } => Some(BaseRelation::B2Prefix { discriminant: *discriminant }),
-                    BaseRelation::B1Prefix { .. } => None, // Can't infer if b1 is a prefix of b2
-                };
-                if let Some(rel) = inferred {
-                    // println!("Inferred hit:  {:?} extends {:?} and {:?} {:?}", b1, orig, b2, rel);
-                    // Print inferred hit and the original identifiers too (just for testing)
-                    // println!("Inferred hit:  {:?} extends {:?} and {:?} {:?}", b1, orig, b2, rel);
-                    // println!("Identifier arrays are {:?} and {:?}", self.get_slice(b1), self.get_slice(b2));
-                    self.id_cmp_cache.store(b1.offset, b2.offset, rel);
-                    return rel;
-                }
-            }
-
+        // Extends shortcut — two integer comparisons, no cache
+        if let Some(rel) = self.try_extends_shortcut(b1, b2) {
+            return rel;
         }
 
         let sa = self.get_slice_unchecked(b1);
@@ -250,45 +315,64 @@ impl IdArena {
         let sb_len = sb.len();
         let min_len = sa_len.min(sb_len);
 
-        let sa_prefix = unsafe { sa.get_unchecked(..min_len) };
-        let sb_prefix = unsafe { sb.get_unchecked(..min_len) };
+        // ── Phase 1: compare first DEPTH_THRESHOLD elements inline ──
+        // Resolves ~45% of comparisons with zero cache overhead.
+        let phase1_end = min_len.min(DEPTH_THRESHOLD);
 
-        match sa_prefix.cmp(sb_prefix) {
+        match unsafe { sa.get_unchecked(..phase1_end) }
+            .cmp(unsafe { sb.get_unchecked(..phase1_end) })
+        {
+            Ordering::Equal => {}
+            ord => return BaseRelation::Diverged(ord),
+        }
+
+        // If either slice is shorter than the threshold, we've already
+        // compared everything we need — resolve without cache.
+        if min_len <= DEPTH_THRESHOLD {
+            return match sa_len.cmp(&sb_len) {
+                Ordering::Equal => BaseRelation::Equal,
+                Ordering::Less => BaseRelation::B1Prefix {
+                    discriminant: unsafe { *sb.get_unchecked(min_len) },
+                },
+                Ordering::Greater => BaseRelation::B2Prefix {
+                    discriminant: unsafe { *sa.get_unchecked(min_len) },
+                },
+            };
+        }
+
+        // ── Phase 2: both bases ≥ DEPTH_THRESHOLD, prefix matches ──
+        // Now the remaining comparison is expensive enough to justify
+        // a cache probe (~3-5 ns for the flat array).
+        if let Some(rel) = self.rel_cache.lookup(b1.offset, b2.offset) {
+            return rel;
+        }
+
+        // ── Phase 3: cache miss — compare remaining elements ────────
+        match unsafe { sa.get_unchecked(DEPTH_THRESHOLD..min_len) }
+            .cmp(unsafe { sb.get_unchecked(DEPTH_THRESHOLD..min_len) })
+        {
             Ordering::Equal => {}
             ord => {
-                // Add to cache 
                 let rel = BaseRelation::Diverged(ord);
-                self.id_cmp_cache.store(b1.offset, b2.offset, rel);
+                self.rel_cache.store(b1.offset, b2.offset, rel);
                 return rel;
-                // return BaseRelation::Diverged(ord)
-            },
+            }
         }
 
-        match sa_len.cmp(&sb_len) {
-            Ordering::Equal => {
-                // Same content, different offsets (shouldn't happen with
-                // proper interning, but handle gracefully).
-                // let rel = BaseRelation::Equal;
-                self.id_cmp_cache.store(b1.offset, b2.offset, BaseRelation::Equal);
-                BaseRelation::Equal
-                // BaseRelation::Equal
-            }
-            Ordering::Less => {
-                let rel = BaseRelation::B1Prefix {
-                    discriminant: unsafe { *sb.get_unchecked(min_len) },
-                };
-                self.id_cmp_cache.store(b1.offset, b2.offset, rel);
-                rel
+        let rel = match sa_len.cmp(&sb_len) {
+            Ordering::Equal => BaseRelation::Equal,
+            Ordering::Less => BaseRelation::B1Prefix {
+                discriminant: unsafe { *sb.get_unchecked(min_len) },
             },
-            Ordering::Greater => {
-                let rel = BaseRelation::B2Prefix {
-                    discriminant: unsafe { *sa.get_unchecked(min_len) },
-                };
-                self.id_cmp_cache.store(b1.offset, b2.offset, rel);
-                rel
+            Ordering::Greater => BaseRelation::B2Prefix {
+                discriminant: unsafe { *sa.get_unchecked(min_len) },
             },
-        }
+        };
+        self.rel_cache.store(b1.offset, b2.offset, rel);
+        rel
     }
+
+    // ── Public comparison API ────────────────────────────
 
     #[inline]
     pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
@@ -309,7 +393,6 @@ impl IdArena {
         b1_base: Identifier, b1_lo: u32, b1_hi: u32,
         b2_base: Identifier, b2_lo: u32, b2_hi: u32,
     ) -> IdOrderingRelation {
-        // Fast path: same base → pure offset arithmetic
         if b1_base == b2_base {
             if b1_lo == b2_lo && b1_hi == b2_hi {
                 return IdOrderingRelation::B1EqualsB2;
@@ -328,7 +411,6 @@ impl IdArena {
             }
         }
 
-        // ── Compare bases once, reuse for all ref comparisons ──
         let rel = self.base_relation(b1_base, b2_base);
 
         match rel.compare(b1_lo, b2_lo) {
@@ -347,8 +429,6 @@ impl IdArena {
                 }
             }
             Ordering::Equal => {
-                // Same begin position but different bases — shouldn't
-                // happen in well-formed LogootSplit, but handle gracefully.
                 IdOrderingRelation::B1BeforeB2
             }
         }
@@ -358,7 +438,7 @@ impl IdArena {
         self.compare_intervals_raw(b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi)
     }
 
-    // ── num_insertable ───────────────────────────────────────
+    // ── num_insertable / find_split_point ────────────────
 
     pub fn num_insertable(&self, id_insert: IdentifierRef, id_next: IdentifierRef, length: u32) -> u32 {
         let insert_slice = self.get_slice(id_insert.base);
@@ -405,7 +485,7 @@ impl IdArena {
         }
     }
 
-    // ── Accessors ────────────────────────────────────────────
+    // ── Accessors ────────────────────────────────────────
 
     #[inline(always)]
     pub fn get_path(&self, id: Identifier) -> &[u32] {
