@@ -5,6 +5,7 @@ use rand::RngExt;
 
 pub const MIN_VALUE: u32 = 0;
 pub const MAX_VALUE: u32 = 100000;
+pub const MAX_AGENTS: u32 = 1000;
 pub type Range = (u32, u32);
 
 const EMPTY_OFFSET: u32 = u32::MAX;
@@ -392,7 +393,7 @@ pub fn generate_base(
     new_path.push(nxt);
     // new_path.push(state.replica);
     // new_path.push(state.local_clock);
-    new_path.push(state.replica + state.local_clock*100);
+    new_path.push(state.replica + state.local_clock*MAX_AGENTS);
 
     arena.intern(&new_path, true)
 }

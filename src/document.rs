@@ -192,61 +192,6 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
     }
 }
 
-
-// fn insert_new_block(doc: &mut Document, id_low: IdentifierRef, id_high: IdentifierRef, text: String, site: u32, id: Option<Identifier>) -> Operation {
-//     let base = {
-//         if id.is_none() { generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state) }
-//         else { id.unwrap().clone() }
-//     };
-//     let _size = text.chars().count() as u32;
-//     doc.blocks.insert_by_id(site, &doc.id_trie, base.clone(), 0, text.clone());
-//     return Operation 
-//     { op_type: OperationType::Insert, 
-//         ids: vec![(base, 0, 1)], 
-//         payload: Some(text), 
-//         site: site, 
-//         clock: doc.state.local_clock 
-//     }
-// }
-
-// fn split_and_insert_block(doc: &mut Document, text: String, block: usize, _path: &Path, sp: u32, site: u32, id: Option<Identifier>) -> Operation {
-//     // sp is the split point 
-//     let base_id = doc.blocks.node_base_id(block).clone();
-//     let offsets = doc.blocks.node_ranges(block);
-//     let owner = doc.blocks.node_creator(block);
-
-//     // Create 2 new blocks with the content split at sp 
-//     let content = doc.blocks.node_content(Some(block));
-//     let lcontent = content.chars().take(sp as usize).collect::<String>();
-//     let rcontent = content.chars().skip(sp as usize).collect::<String>();
-    
-//     let res = doc.blocks.delete_by_id(&doc.id_trie,base_id.clone(), offsets.0);
-//     if res.is_err() {
-//         panic!("Error deleting block during split");
-//     }
-
-//     doc.blocks.insert_by_id(owner, &doc.id_trie, base_id.clone(), offsets.0, lcontent.clone());    
-//     doc.blocks.insert_by_id(owner, &doc.id_trie, base_id.clone(), offsets.0 + sp, rcontent.clone());
-
-//     // Insert the new block in between
-//     let id_low = IdentifierRef::new(base_id, offsets.0 + sp - 1);
-//     let id_high = IdentifierRef::new(base_id, offsets.0 + sp);
-
-//     let new_id = if let Some(id) = id {
-//         id.clone()
-//     } else {
-//         generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state)
-//     };
-//     doc.blocks.insert_by_id(site, &doc.id_trie, new_id.clone(), 0, text.clone());
-//     return Operation 
-//     { op_type: OperationType::Insert, 
-//         ids: vec![(new_id, 0, 1)], 
-//         payload: Some(text), 
-//         site: site, 
-//         clock: doc.state.local_clock 
-//      }
-// }
-
 fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     let doc_size = doc.blocks.tree_size();
     let pos = if pos > doc_size { doc_size } else { pos };
@@ -313,7 +258,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         };
     }
  
-    // ── Insert at start of block ────────────────────────────────────────
     if pos == block_start {
         let id_low = match doc.blocks.prev(block, &path) {
             Some(prev_block) => {
@@ -353,7 +297,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     let base = generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state);
     let middle = Node::new(text.clone(), base, 0, doc.state.replica);
  
-    // *** DIRECT: one call replaces delete_by_id + 3× insert_by_id ***
     doc.blocks.split_and_insert_middle(&path, sp as usize, middle);
  
     Operation {
@@ -375,25 +318,6 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     // Find and insert this id 
     doc.blocks.insert_by_id(site, &doc.id_trie, base, offset, text.to_string());
 }
-
-// fn delete_and_split(doc: &mut Document, block: usize, _path: &Path, left: usize, n: usize) {
-//     // Prepare the 2 blocks after the split 
-//     let base_id = doc.blocks.node_base_id(block).clone();
-//     let offsets = doc.blocks.node_ranges(block);
-//     let creator = doc.blocks.node_creator(block);
-
-//     let content = doc.blocks.node_content(Some(block));
-//     let lcontent = content.chars().take(left as usize).collect::<String>();
-//     let rcontent = content.chars().skip((left+n) as usize).collect::<String>();
-
-//     let res = doc.blocks.delete_by_id(&doc.id_trie, base_id.clone(), offsets.0);
-//     if res.is_err() {
-//         panic!("Error deleting block during delete and split");
-//     }
-
-//     doc.blocks.insert_by_id(creator, &doc.id_trie, base_id.clone(), offsets.0, lcontent, );
-//     doc.blocks.insert_by_id(creator, &doc.id_trie, base_id.clone(), offsets.0 + (left+n) as u32, rcontent);
-// }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     let mut num_delete = to - from;
@@ -515,10 +439,6 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             if offset == block_ranges.0 && n_in_block >= block_size {
                 // Case 1: delete the entire block 
                 doc.blocks.delete_at_path(&path);
-                // let res = doc.blocks.delete_by_id(&doc.id_trie,base_id.clone(), block_ranges.0);
-                // if res.is_err() {
-                //     panic!("Error deleting block during remote delete");
-                // }
             } else if offset == block_ranges.0 {
                 doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::Start, &path);
             } else if offset + n_in_block as u32 >= block_ranges.1 {

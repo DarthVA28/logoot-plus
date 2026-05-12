@@ -30,9 +30,3 @@ impl Node {
         }
     }
 }
-
-// pub struct BaseBlock {
-//     pub base: TrieId, 
-//     pub range: Range, 
-//     pub creator: u32
-// }
