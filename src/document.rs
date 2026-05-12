@@ -380,74 +380,96 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
 fn remote_delete(doc: &mut Document, op: &Operation) {
     let del_ids = &op.ids;
     for (id, start, end) in del_ids {
-        // start is inclusive, end is exclusive
-        let offsets_len = end - start;
-        let mut processed = 0;
-        while processed < offsets_len {
-            // FIXME: place of inefficiency
-            let path = doc.blocks.find_by_id_exact(&doc.id_trie, id.clone(), start + processed);
+        let mut cursor = *start;
+        // Surviving neighbor from the last iteration — used as a
+        // linked-list anchor to skip gaps without tree traversals.
+        let mut ll_anchor: Option<usize> = None;
+
+        while cursor < *end {
+            let path = doc.blocks.find_by_id_exact(&doc.id_trie, *id, cursor);
+
             if path.is_empty() {
-                // Base id not in tree at all
-                // Buffer the entire remaining range [start+processed, end) as ONE op.
-                if doc.blocks.base_id_max_offset(*id).map_or(true, |hi| hi <= start + processed) {
+                // ── Fast exit: no offsets for this base beyond cursor ────
+                if doc.blocks.base_id_max_offset(*id).map_or(true, |hi| hi <= cursor) {
                     let partial_op = Operation {
                         op_type: OperationType::Delete,
-                        ids: vec![(id.clone(), start + processed, *end)],
+                        ids: vec![(*id, cursor, *end)],
                         payload: None,
                         site: op.site,
                         clock: op.clock,
                     };
                     doc.oplog.add_to_pending(partial_op);
-                    break; 
+                    break;
                 }
 
-                // base id exists but this offset is missing 
-                let missing_start = start + processed;
-                processed += 1;
-                while processed < offsets_len {
-                    if doc.blocks.find_by_id_exact(&doc.id_trie, *id, start + processed).is_empty() {
-                        processed += 1;
-                    } else {
-                        break;
+                // ── Find where the gap ends ─────────────────────────────
+                let gap_end = if let Some(anchor) = ll_anchor {
+                    // O(few hops) — same-base nodes cluster in the LL
+                    doc.blocks.ll_scan_for_base(anchor, *id, cursor, *end)
+                } else {
+                    // No anchor yet (gap at the very start of the range).
+                    // Fall back to linear probe — this is rare and short.
+                    let mut probe = cursor + 1;
+                    while probe < *end {
+                        if !doc.blocks.find_by_id_exact(&doc.id_trie, *id, probe).is_empty() {
+                            break;
+                        }
+                        probe += 1;
                     }
-                }
+                    probe
+                };
+
                 let partial_op = Operation {
                     op_type: OperationType::Delete,
-                    ids: vec![(id.clone(), missing_start, start + processed)],
+                    ids: vec![(*id, cursor, gap_end)],
                     payload: None,
                     site: op.site,
                     clock: op.clock,
                 };
                 doc.oplog.add_to_pending(partial_op);
+                cursor = gap_end;
                 continue;
+            }
 
+            // ── Found the node ──────────────────────────────────────────
+            let block = *path.last().unwrap();
+            if doc.blocks.node_base_id(block) != *id {
+                panic!(
+                    "remote_delete: expected base {:?} at offset {}, found {:?} at site {}",
+                    id, cursor, doc.blocks.node_base_id(block), doc.state.replica
+                );
             }
-            // Verify if the base id of the blocks are the same else continue 
-            if doc.blocks.node_base_id(*path.last().unwrap()) != *id {
-                // Throw an error 
-                panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, start + processed, doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
-            }
-            let block: usize = *path.last().unwrap();
-            // let base_id = doc.blocks.node_base_id(block);
+
             let block_ranges = doc.blocks.node_ranges(block);
             let block_size = block_ranges.1 - block_ranges.0;
-            let offset = start + processed;
+            let overlap_lo = cursor.max(block_ranges.0);
+            let overlap_hi = (*end).min(block_ranges.1);
+            let n_in_block = overlap_hi - overlap_lo;
 
-            let n_in_block = end.min(&block_ranges.1) - offset.max(block_ranges.0);
+            // ── Capture LL neighbors BEFORE mutating ────────────────────
+            let ll_prev = doc.blocks.nodes[block].ll_prev;
+            let ll_next = doc.blocks.nodes[block].ll_next;
 
-            // Same 4 cases as local delete
-            if offset == block_ranges.0 && n_in_block >= block_size {
-                // Case 1: delete the entire block 
+            if overlap_lo == block_ranges.0 && n_in_block >= block_size {
+                // Full delete — block is freed, use a surviving neighbor
                 doc.blocks.delete_at_path(&path);
-            } else if offset == block_ranges.0 {
+                ll_anchor = ll_prev.or(ll_next);
+            } else if overlap_lo == block_ranges.0 {
+                // Truncate start — block survives
                 doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::Start, &path);
-            } else if offset + n_in_block as u32 >= block_ranges.1 {
+                ll_anchor = Some(block);
+            } else if overlap_hi >= block_ranges.1 {
+                // Truncate end — block survives
                 doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::End, &path);
+                ll_anchor = Some(block);
             } else {
-                let sp = (offset - block_ranges.0) as usize;
-                doc.blocks.delete_middle_at_path(&path, sp, n_in_block as usize);             
+                // Middle delete (split) — block becomes left half, survives
+                let sp = (overlap_lo - block_ranges.0) as usize;
+                doc.blocks.delete_middle_at_path(&path, sp, n_in_block as usize);
+                ll_anchor = Some(block);
             }
-            processed += n_in_block;
+
+            cursor = overlap_hi;
         }
     }
 }

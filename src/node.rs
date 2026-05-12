@@ -11,7 +11,10 @@ pub struct Node {
     pub subtree_count: usize, // subtree count is the number of chars in the subtree rooted at this node
     pub creator: u32, // replica id of the creator
     pub base_id: Identifier,
-    pub offset: u32 // starting offset 
+    pub offset: u32, // starting offset 
+    pub ll_prev: Option<usize>,
+    pub ll_next: Option<usize>
+
 }
 
 impl Node {
@@ -26,7 +29,9 @@ impl Node {
             subtree_count: size, 
             base_id: base_id,
             offset: offset,
-            creator: creator
+            creator: creator,
+            ll_prev: None,
+            ll_next: None
         }
     }
 }
