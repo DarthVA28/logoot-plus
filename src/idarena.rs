@@ -1,6 +1,6 @@
-use std::{cmp::Ordering};
+use std::cmp::Ordering;
 use ahash::AHashMap as HashMap;
-use crate::{state::State};
+use crate::state::State;
 use rand::RngExt;
 
 pub const MIN_VALUE: u32 = 0;
@@ -37,32 +37,6 @@ impl std::hash::Hash for Identifier {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.offset.hash(state); }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct IdentifierRef {
-    pub base: Identifier,
-    pub extra: u32,
-}
-
-impl IdentifierRef {
-    #[inline(always)]
-    pub fn new(base: Identifier, extra: u32) -> Self { IdentifierRef { base, extra } }
-    pub fn doc_start() -> Self { IdentifierRef { base: Identifier::EMPTY, extra: MIN_VALUE } }
-    pub fn doc_end()   -> Self { IdentifierRef { base: Identifier::EMPTY, extra: MAX_VALUE } }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct IdentifierInterval {
-    pub base: Identifier,
-    pub lo: u32,
-    pub hi: u32,
-}
-
-impl IdentifierInterval {
-    pub fn new(base: Identifier, lo: u32, hi: u32) -> Self { IdentifierInterval { base, lo, hi } }
-    pub fn id_begin(&self) -> IdentifierRef { IdentifierRef::new(self.base, self.lo) }
-    pub fn id_end(&self)   -> IdentifierRef { IdentifierRef::new(self.base, self.hi - 1) }
-}
-
 pub enum IdOrderingRelation {
     B1BeforeB2,
     B1AfterB2,
@@ -77,9 +51,6 @@ pub enum IdOrderingRelation {
 enum BaseRelation {
     Diverged(Ordering),
     Equal,
-    /// b1's base is a proper prefix of b2's base.
-    /// `discriminant` = b2_base[b1_base.len()] — the value b1's extra
-    /// is compared against.
     B1Prefix { discriminant: u32 },
     B2Prefix { discriminant: u32 },
 }
@@ -89,16 +60,13 @@ impl BaseRelation {
     fn compare(self, b1_extra: u32, b2_extra: u32) -> Ordering {
         match self {
             BaseRelation::Diverged(ord) => ord,
-
             BaseRelation::Equal => b1_extra.cmp(&b2_extra),
-
             BaseRelation::B1Prefix { discriminant } => {
                 match b1_extra.cmp(&discriminant) {
                     Ordering::Equal => Ordering::Less,
                     ord => ord,
                 }
             }
-
             BaseRelation::B2Prefix { discriminant } => {
                 match discriminant.cmp(&b2_extra) {
                     Ordering::Equal => Ordering::Greater,
@@ -133,12 +101,11 @@ impl IdArena {
 
         let hash = self.hash_slice(path);
         let len = path.len() as u32;
-        
+
         if !is_new {
             if let Some(candidates) = self.dedup.get(&hash) {
                 for &(offset, cand_len) in candidates {
                     if cand_len == len {
-                        // let stored = &self.data[offset as usize..(offset as usize + len as usize)];
                         let stored = unsafe {
                             self.data.get_unchecked(offset as usize..(offset as usize + len as usize))
                         };
@@ -180,7 +147,6 @@ impl IdArena {
 
     #[inline]
     fn base_relation(&self, b1: Identifier, b2: Identifier) -> BaseRelation {
-        // Same interned identity → Equal (fast path)
         if b1.offset == b2.offset {
             return BaseRelation::Equal;
         }
@@ -200,11 +166,7 @@ impl IdArena {
         }
 
         match sa_len.cmp(&sb_len) {
-            Ordering::Equal => {
-                // Same content, different offsets (shouldn't happen with
-                // proper interning, but handle gracefully).
-                BaseRelation::Equal
-            }
+            Ordering::Equal => BaseRelation::Equal,
             Ordering::Less => BaseRelation::B1Prefix {
                 discriminant: unsafe { *sb.get_unchecked(min_len) },
             },
@@ -218,18 +180,20 @@ impl IdArena {
     pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
         if a.offset == b.offset { return Ordering::Equal; }
         self.get_slice_unchecked(a).cmp(self.get_slice_unchecked(b))
-        // self.get_slice(a).cmp(self.get_slice(b))
     }
 
+    /// Compare two (base, extra) pairs. Replaces the old compare_refs(IdentifierRef, IdentifierRef).
     #[inline]
-    pub fn compare_refs(&self, a: IdentifierRef, b: IdentifierRef) -> Ordering {
-        if a.base.offset == b.base.offset {
-            return a.extra.cmp(&b.extra);
+    pub fn compare_refs(&self, a_base: Identifier, a_extra: u32, b_base: Identifier, b_extra: u32) -> Ordering {
+        if a_base.offset == b_base.offset {
+            return a_extra.cmp(&b_extra);
         }
-        self.base_relation(a.base, b.base).compare(a.extra, b.extra)
+        self.base_relation(a_base, b_base).compare(a_extra, b_extra)
     }
 
-    pub fn compare_intervals_raw(
+    /// Compare two intervals given as (base, lo, hi). This is the only interval
+    /// comparison function — the old wrapper taking IdentifierInterval is removed.
+    pub fn compare_intervals(
         &self,
         b1_base: Identifier, b1_lo: u32, b1_hi: u32,
         b2_base: Identifier, b2_lo: u32, b2_hi: u32,
@@ -257,11 +221,6 @@ impl IdArena {
 
         match rel.compare(b1_lo, b2_lo) {
             Ordering::Less => {
-                // b1 starts before b2.
-                // Containment check: is b1_end > b2_begin?
-                //   b1_end   = (b1_base, b1_hi - 1)
-                //   b2_begin = (b2_base, b2_lo)
-                // rel.compare gives ordering of (b1_base, x) vs (b2_base, y).
                 if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
                     IdOrderingRelation::B2InsideB1
                 } else {
@@ -276,48 +235,49 @@ impl IdArena {
                 }
             }
             Ordering::Equal => {
-                // Same begin position but different bases — shouldn't
-                // happen in well-formed LogootSplit, but handle gracefully.
                 IdOrderingRelation::B1BeforeB2
             }
         }
     }
 
-    pub fn compare_intervals(&self, b1: &IdentifierInterval, b2: &IdentifierInterval) -> IdOrderingRelation {
-        self.compare_intervals_raw(b1.base, b1.lo, b1.hi, b2.base, b2.lo, b2.hi)
-    }
-
-    // ── num_insertable ───────────────────────────────────────
-
-    pub fn num_insertable(&self, id_insert: IdentifierRef, id_next: IdentifierRef, length: u32) -> u32 {
-        // let insert_slice = self.get_slice(id_insert.base);
-        // let next_slice = self.get_slice(id_next.base);
-        let insert_slice = self.get_slice_unchecked(id_insert.base);
-        let next_slice = self.get_slice_unchecked(id_next.base);
+    /// How many characters from `insert` can be placed before `next`.
+    /// Replaces the old num_insertable(IdentifierRef, IdentifierRef, u32).
+    pub fn num_insertable(
+        &self,
+        insert_base: Identifier, insert_extra: u32,
+        next_base: Identifier, next_extra: u32,
+        length: u32,
+    ) -> u32 {
+        let insert_slice = self.get_slice_unchecked(insert_base);
+        let next_slice = self.get_slice_unchecked(next_base);
 
         let l = insert_slice.len();
 
         if l >= next_slice.len() + 1 { return length; }
 
-        let next_full_iter = next_slice.iter().chain(std::iter::once(&id_next.extra));
+        let next_full_iter = next_slice.iter().chain(std::iter::once(&next_extra));
         for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
             if a != b { return length; }
         }
 
-        let next_at_l = if l < next_slice.len() { next_slice[l] } else { id_next.extra };
-        next_at_l + 1 - id_insert.extra
+        let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
+        next_at_l + 1 - insert_extra
     }
 
-    pub fn find_split_point(&self, idi_short: &IdentifierInterval, id_long: Identifier) -> u32 {
+    /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
+    /// Replaces the old find_split_point(&IdentifierInterval, Identifier).
+    pub fn find_split_point(
+        &self,
+        short_base: Identifier, short_lo: u32, short_hi: u32,
+        id_long: Identifier,
+    ) -> u32 {
         if id_long.is_empty() { return 0; }
 
-        let text_len = idi_short.hi - idi_short.lo;
+        let text_len = short_hi - short_lo;
         if text_len == 0 { return 0; }
 
-        // let long_slice = self.get_slice(id_long);
-        // let short_slice = self.get_slice(idi_short.base);
         let long_slice = self.get_slice_unchecked(id_long);
-        let short_slice = self.get_slice_unchecked(idi_short.base);
+        let short_slice = self.get_slice_unchecked(short_base);
 
         let min_len = short_slice.len().min(long_slice.len());
 
@@ -330,20 +290,17 @@ impl IdArena {
         }
 
         if short_slice.len() < long_slice.len() {
-            // let pivot = long_slice[min_len];
             let pivot = unsafe { *long_slice.get_unchecked(min_len) };
             let extras_below = if long_slice.len() > min_len + 1 {
-                pivot.saturating_add(1).saturating_sub(idi_short.lo)
+                pivot.saturating_add(1).saturating_sub(short_lo)
             } else {
-                pivot.saturating_sub(idi_short.lo)
+                pivot.saturating_sub(short_lo)
             };
             return extras_below.min(text_len);
         } else {
             return 0;
         }
     }
-
-    // ── Accessors ────────────────────────────────────────────
 
     #[inline(always)]
     pub fn get_path(&self, id: Identifier) -> &[u32] {
@@ -369,16 +326,16 @@ impl IdArena {
 
 pub fn generate_base(
     arena: &mut IdArena,
-    id_low: IdentifierRef,
-    id_high: IdentifierRef,
+    low_base: Identifier, low_extra: u32,
+    high_base: Identifier, high_extra: u32,
     state: &mut State,
 ) -> Identifier {
-    let low_slice = arena.get_slice(id_low.base);
-    let high_slice = arena.get_slice(id_high.base);
+    let low_slice = arena.get_slice(low_base);
+    let high_slice = arena.get_slice(high_base);
 
     let mut new_path: Vec<u32> = Vec::new();
-    let mut low_iter = low_slice.iter().copied().chain(std::iter::once(id_low.extra));
-    let mut high_iter = high_slice.iter().copied().chain(std::iter::once(id_high.extra));
+    let mut low_iter = low_slice.iter().copied().chain(std::iter::once(low_extra));
+    let mut high_iter = high_slice.iter().copied().chain(std::iter::once(high_extra));
 
     let mut l = low_iter.next().unwrap_or(MIN_VALUE);
     let mut h = high_iter.next().unwrap_or(MAX_VALUE);
@@ -391,9 +348,7 @@ pub fn generate_base(
 
     let nxt = state.rng.random_range(l + 1..h);
     new_path.push(nxt);
-    // new_path.push(state.replica);
-    // new_path.push(state.local_clock);
-    new_path.push(state.replica + state.local_clock*MAX_AGENTS);
+    new_path.push(state.replica + state.local_clock * MAX_AGENTS);
 
     arena.intern(&new_path, true)
 }

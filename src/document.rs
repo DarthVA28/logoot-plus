@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::idarena::{IdArena, Range, Identifier, IdentifierRef, generate_base};
+use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, Range, generate_base};
 use crate::node::Node;
 use crate::tree::{DelLocation, Path, Tree};
 use crate::state::State;
@@ -9,7 +9,7 @@ use crate::operation::{OpLog, Operation, OperationType, WireOperation};
 #[derive(Clone, Debug)]
 pub struct Document { 
     pub blocks: Tree,
-    pub id_trie: IdArena,
+    pub id_arena: IdArena,
     state: State,
     used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
@@ -22,7 +22,7 @@ impl Document {
     pub fn new(id: u32) -> Self {
         Document {
             blocks: Tree::new(),
-            id_trie: IdArena::new(),
+            id_arena: IdArena::new(),
             state: State::new(id),
             used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
@@ -48,7 +48,7 @@ impl Document {
         // println!("Inserting '{}' at pos {} at site {}", text, pos, self.state.replica);
         let op = local_insert(self, pos, text);
         if self.debug {
-            if !self.blocks.check_tree(&self.id_trie) {
+            if !self.blocks.check_tree(&self.id_arena) {
                 self.blocks.print_tree();
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
@@ -59,14 +59,14 @@ impl Document {
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
-        Some(op.to_wire(&self.id_trie))
+        Some(op.to_wire(&self.id_arena))
     }
 
     pub fn del(&mut self, from: usize, to: usize) -> WireOperation {
         // println!("Deleting from {} to {} at site {}", from, to, self.state.replica);
         let op = local_delete(self, from, to);
         if self.debug {
-            if !self.blocks.check_tree(&self.id_trie) {
+            if !self.blocks.check_tree(&self.id_arena) {
                 self.blocks.print_tree();
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
@@ -76,7 +76,7 @@ impl Document {
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
-        op.to_wire(&self.id_trie)
+        op.to_wire(&self.id_arena)
     }
 
     pub fn read(&mut self) -> String {
@@ -93,7 +93,7 @@ impl Document {
     }
 
     pub fn apply_remote_op(&mut self, wire_op: &WireOperation) {
-        let op = Operation::from_wire(wire_op, &mut self.id_trie);
+        let op = Operation::from_wire(wire_op, &mut self.id_arena);
         self.apply_op(&op);
     }
 
@@ -111,7 +111,7 @@ impl Document {
         }
         
         if self.debug {
-            if !self.blocks.check_tree(&self.id_trie) {
+            if !self.blocks.check_tree(&self.id_arena) {
                 self.blocks.print_tree();
                 panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
             }
@@ -142,7 +142,7 @@ impl Document {
     /* Public API for benchmarking */
     pub fn reset (&mut self) {
         self.blocks.clear();
-        self.id_trie.clear();
+        self.id_arena.clear();
         self.used_ranges_for_id.clear();
         self.snapshot.clear();
         self.oplog.clear();
@@ -161,15 +161,13 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
         let text_len = text.chars().count() as u32;
         let next_base = doc.blocks.node_base_id(nxt_block);
         let next_offsets = doc.blocks.node_ranges(nxt_block);
-        let id_insert = IdentifierRef::new(insert_base, insert_offsets.1);
-        let id_next   = IdentifierRef::new(next_base, next_offsets.0);
-        let n = doc.id_trie.num_insertable(id_insert, id_next, text_len);
+        // let id_insert = IdentifierRef::new(insert_base, insert_offsets.1);
+        // let id_next   = IdentifierRef::new(next_base, next_offsets.0);
+        // let n = doc.id_trie.num_insertable(id_insert, id_next, text_len);
+        let n = doc.id_arena.num_insertable(insert_base, insert_offsets.1, next_base, next_offsets.0, text_len);
         if n < text_len {
             // Can't extend — not enough room before the next block.
-            // Fall back to creating a new block between this and next.
-            let id_low  = IdentifierRef::new(insert_base, insert_offsets.1 - 1);
-            let id_high = IdentifierRef::new(next_base, next_offsets.0);
-            let base = generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state);
+            let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state);
             let node = Node::new(text.clone(), base, 0, site);
             doc.blocks.insert_after(path, node);
             return Operation {
@@ -200,12 +198,13 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
  
     // ── Empty tree ──────────────────────────────────────────────────────
     if path.is_empty() {
-        let base = generate_base(
-            &mut doc.id_trie,
-            IdentifierRef::doc_start(),
-            IdentifierRef::doc_end(),
-            &mut doc.state,
-        );
+        // let base = generate_base(
+        //     &mut doc.id_arena,
+        //     IdentifierRef::doc_start(),
+        //     IdentifierRef::doc_end(),
+        //     &mut doc.state,
+        // );
+        let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
         doc.blocks.insert_first(node);
         return Operation {
@@ -234,16 +233,17 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         }
  
         // Can't extend — create a new block after this one.
-        let id_low = IdentifierRef::new(block_base, block_ranges.1 - 1);
-        let id_high = match doc.blocks.next(block, &path) {
+        // let id_low = IdentifierRef::new(block_base, block_ranges.1 - 1);
+        // let base;
+        let base = match doc.blocks.next(block, &path) {
             Some(next_block) => {
                 let next_base   = doc.blocks.node_base_id(next_block);
                 let next_ranges = doc.blocks.node_ranges(next_block);
-                IdentifierRef::new(next_base, next_ranges.0)
+                generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, next_base, next_ranges.0, &mut doc.state)
             }
-            None => IdentifierRef::doc_end(),
+            None => generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, Identifier::EMPTY, MAX_VALUE, &mut doc.state)
         };
-        let base = generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state);
+        // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
  
         // *** DIRECT: insert_after uses the path, no find_by_id ***
@@ -259,16 +259,17 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     }
  
     if pos == block_start {
-        let id_low = match doc.blocks.prev(block, &path) {
+        let base = match doc.blocks.prev(block, &path) {
             Some(prev_block) => {
                 let prev_base   = doc.blocks.node_base_id(prev_block);
                 let prev_ranges = doc.blocks.node_ranges(prev_block);
-                IdentifierRef::new(prev_base, prev_ranges.1 - 1)
+                // IdentifierRef::new(prev_base, prev_ranges.1 - 1)
+                generate_base(&mut doc.id_arena, prev_base, prev_ranges.1 - 1, block_base, block_ranges.0, &mut doc.state)
             }
-            None => IdentifierRef::doc_start(),
+            None => generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, block_base, block_ranges.0, &mut doc.state),
         };
-        let id_high = IdentifierRef::new(block_base, block_ranges.0);
-        let base = generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state);
+        // let id_high = IdentifierRef::new(block_base, block_ranges.0);
+        // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
  
         // *** DIRECT: insert_before uses the path, no find_by_id ***
@@ -292,9 +293,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         block_ranges.1 - block_ranges.0
     );
  
-    let id_low  = IdentifierRef::new(block_base, block_ranges.0 + sp - 1);
-    let id_high = IdentifierRef::new(block_base, block_ranges.0 + sp);
-    let base = generate_base(&mut doc.id_trie, id_low, id_high, &mut doc.state);
+    let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state);
     let middle = Node::new(text.clone(), base, 0, doc.state.replica);
  
     doc.blocks.split_and_insert_middle(&path, sp as usize, middle);
@@ -316,7 +315,7 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     let site = op.site;
 
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &doc.id_trie, base, offset, text.to_string());
+    doc.blocks.insert_by_id(site, &doc.id_arena, base, offset, text.to_string());
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
@@ -352,17 +351,13 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
             num_delete = 0;
  
         } else if end_del >= block_size {
-            // ── Case 3: delete from end of block ────────────────────────
             let n = block_size - start_del;
             del_info.push((base_id, block_ranges.0 + start_del as u32, block_ranges.1));
             doc.blocks.truncate_content(block, n, DelLocation::End, &path);
             num_delete -= n;
  
         } else {
-            // ── Case 4: delete from middle (split around hole) ──────────
             del_info.push((base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
- 
-            // *** DIRECT: one call replaces delete_by_id + 2× insert_by_id ***
             doc.blocks.delete_middle_at_path(&path, start_del, num_delete);
             num_delete = 0;
         }
@@ -385,7 +380,7 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
         let mut processed = 0;
         while processed < offsets_len {
             // FIXME: place of inefficiency
-            let path = doc.blocks.find_by_id_exact(&doc.id_trie, id.clone(), start + processed);
+            let path = doc.blocks.find_by_id_exact(&doc.id_arena, id.clone(), start + processed);
             if path.is_empty() {
                 // Base id not in tree at all
                 // Buffer the entire remaining range [start+processed, end) as ONE op.
@@ -405,7 +400,7 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
                 let missing_start = start + processed;
                 processed += 1;
                 while processed < offsets_len {
-                    if doc.blocks.find_by_id_exact(&doc.id_trie, *id, start + processed).is_empty() {
+                    if doc.blocks.find_by_id_exact(&doc.id_arena, *id, start + processed).is_empty() {
                         processed += 1;
                     } else {
                         break;
