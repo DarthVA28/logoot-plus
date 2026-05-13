@@ -158,7 +158,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
     let insert_offsets = doc.blocks.node_ranges(block);
  
     if let Some(nxt_block) = next {
-        let text_len = text.chars().count() as u32;
+        let text_len = text.len() as u32;
         let next_base = doc.blocks.node_base_id(nxt_block);
         let next_offsets = doc.blocks.node_ranges(nxt_block);
         // let id_insert = IdentifierRef::new(insert_base, insert_offsets.1);

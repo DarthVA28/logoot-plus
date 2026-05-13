@@ -87,7 +87,7 @@ impl IdArena {
     pub fn new() -> Self {
         IdArena {
             data: Vec::with_capacity(4096),
-            dedup: HashMap::with_capacity(1024),
+            dedup: HashMap::with_capacity(8192),
         }
     }
 

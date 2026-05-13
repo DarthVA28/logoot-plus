@@ -121,7 +121,7 @@ impl Tree {
     pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);
-        let added_size = text.chars().count();
+        let added_size = text.len();
         node.size += added_size;
         // update the offsets of the base 
         let base_id = node.base_id;
@@ -138,21 +138,12 @@ impl Tree {
         let n = &mut self.nodes[node];
         match location {
             DelLocation::Start => {
-                let byte_off = n.content.char_indices()
-                    .nth(num_delete)
-                    .map(|(i, _)| i)
-                    .unwrap_or(n.content.len());
-                let kept = n.content.split_off(byte_off);
+                let kept = n.content.split_off(num_delete);
                 n.content = kept;
                 n.offset += num_delete as u32;
             }
             DelLocation::End => {
-                let keep_chars = n.size - num_delete;
-                let byte_off = n.content.char_indices()
-                    .nth(keep_chars)
-                    .map(|(i, _)| i)
-                    .unwrap_or(n.content.len());
-                n.content.truncate(byte_off); // truncate in-place, no allocation
+                n.content.truncate(n.size - num_delete);
             }
         }
         n.size -= num_delete;
@@ -385,7 +376,7 @@ impl Tree {
 
     /// Insert the node by identifier  
     pub fn insert_by_id(&mut self, site: u32, id_arena: &IdArena, base: Identifier, offset: u32, content: String) {
-        let len = content.chars().count() as u32;
+        let len = content.len() as u32;
         let idx = self.alloca(Node::new(content, base, offset, site)); // moved, not cloned
         if self.is_empty() {
             self.root = Some(idx);
@@ -408,7 +399,7 @@ impl Tree {
         }
     }
 
-    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, mut node_base: Identifier, node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) {
+    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, node_base: Identifier, node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
@@ -447,11 +438,8 @@ impl Tree {
                         let sp = id_arena.find_split_point(from_node.base_id, f_offset, f_offset + from_node.size as u32, node_base);
                         // let sp = id_arena.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
-                        let from_content_ref = &from_node.content;
-                        let b_idx = from_content_ref.char_indices()
-                            .nth(sp as usize)
-                            .map(|(idx, _)| idx)
-                            .unwrap_or(from_content_ref.len());
+                        // let from_content_ref = &from_node.content;
+                        let b_idx = sp as usize;
                         let from_content = std::mem::take(&mut from_node.content);
                         (sp, b_idx, &from_node.base_id, from_node.offset, from_node.creator, from_content)
                     };
@@ -464,7 +452,7 @@ impl Tree {
                     let from_node = &mut self.nodes[from];
                     let original_right = from_node.right;
                     from_node.content = from_content;
-                    from_node.size = from_node.content.chars().count();
+                    from_node.size = from_node.content.len();
                     from_node.right = Some(*right_idx);
 
                     let right_node = &mut self.nodes[*right_idx];
@@ -523,7 +511,7 @@ impl Tree {
                         let content = std::mem::take(&mut self.nodes[node].content);
                         let from_node = &mut self.nodes[from];
                         from_node.content.push_str(&content);
-                        from_node.size = from_node.content.chars().count();
+                        from_node.size = from_node.content.len();
                         self.free(node);
                         con = false;
                     }
@@ -538,13 +526,9 @@ impl Tree {
                         id_arena.find_split_point(node_base, node_lo, node_hi, b2_base)
                     };
                     let content = std::mem::take(&mut self.nodes[node].content);
-                    let byte_idx = content
-                        .char_indices()
-                        .nth(sp as usize)
-                        .map(|(i, _)| i)
-                        .unwrap_or(content.len());
-                    let left_content  = content[..byte_idx].to_string();
-                    let right_content = content[byte_idx..].to_string();
+                    let byte_idx = sp as usize;
+                    let mut left_content = content;
+                    let right_content = left_content.split_off(byte_idx);
                     
                     // FIXME?
                     self.insert_by_id(site, id_arena, node_base, node_lo, left_content);
@@ -825,13 +809,13 @@ impl Tree {
         let original_right = self.nodes[target].right;
 
         let content = std::mem::take(&mut self.nodes[target].content);
-        let byte_idx = content
-            .char_indices()
-            .nth(sp)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-        let left_content  = content[..byte_idx].to_string();
-        let right_content = content[byte_idx..].to_string();
+        // let byte_idx = content
+        //     .char_indices()
+        //     .nth(sp)
+        //     .map(|(i, _)| i)
+        //     .unwrap_or(content.len());
+        let mut left_content = content;
+        let right_content = left_content.split_off(sp);
 
         // ── 2. Update target to be the left half ────────────────────────
         let left_size = sp;
@@ -937,16 +921,9 @@ impl Tree {
         let content = std::mem::take(&mut self.nodes[target].content);
 
         // Find the two byte boundaries with a single pass
-        let mut indices = content.char_indices();
-        let left_byte = indices.nth(start)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-        let mid_byte = indices.nth(count - 1)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-
-        let left_content  = content[..left_byte].to_string();
-        let right_content = content[mid_byte..].to_string();
+        let mut left_content = content;
+        let right_content = left_content.split_off(start + count);
+        left_content.truncate(start);
 
         self.nodes[target].content = left_content;
         self.nodes[target].size = start;

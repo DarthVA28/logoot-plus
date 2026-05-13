@@ -16,7 +16,7 @@ pub struct Node {
 
 impl Node {
     pub fn new(content: String, base_id: Identifier, offset: u32, creator: u32) -> Self {
-        let size = content.chars().count();
+        let size = content.len();
         Node { 
             left: None, 
             right: None, 
