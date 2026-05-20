@@ -338,8 +338,8 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
         } else if end_del >= target_size {
             // Case 3: Delete from end of the block
             let n = target_size - start_del;
-            let _id_lo = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, start_del as u32);
-            del_info.push(IdBlock::new(target_block.low, n as u32, &mut doc.id_arena));
+            let id_lo = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, start_del as u32);
+            del_info.push(IdBlock::new(id_lo, n as u32, &mut doc.id_arena));
             doc.blocks.truncate_content(&mut doc.id_arena, target, n, DelLocation::End, &path);
             num_delete -= n;
  

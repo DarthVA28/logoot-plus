@@ -327,6 +327,9 @@ impl IdArena {
     // [7/10, r3, c3]
     // FIXME
     pub fn generate_id(&mut self, low: Identifier, high: Identifier, state: &mut State) -> Identifier {
+        // Increment the local clock
+        state.local_clock += 1;
+
         let low_s = if low.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(low) };
         let high_s = if high.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(high) };
 

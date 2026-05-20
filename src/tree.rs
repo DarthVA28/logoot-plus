@@ -440,7 +440,7 @@ impl Tree {
                     };
 
                     let rcontent = from_content.split_off(b_idx);
-                    let right_lo = IdBlock::id_with_offset(id_arena, from_block.low, sp+1);
+                    let right_lo = IdBlock::id_with_offset(id_arena, from_block.low, sp);
                     
                     let right_block = IdBlock::new(right_lo, from_block.count - sp, id_arena);         
                     let right_node = Node::new(rcontent, right_block, from_creator);
@@ -514,7 +514,7 @@ impl Tree {
                     let right_content = content[byte_idx..].to_string();
 
                     // Create left and right block 
-                    let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, sp+1);
+                    let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, sp);
                     let mut right_block = IdBlock::new(right_lo, node_block.count - sp, id_arena);
                     
                     node_block.truncate_end(id_arena, node_block.count - sp);
@@ -805,7 +805,7 @@ impl Tree {
         node_block.truncate_end(id_arena, node_block.count - sp as u32);
 
         // Create right block 
-        let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, (sp+1) as u32);
+        let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, sp as u32);
         let right_block = IdBlock::new(right_lo, node_block.count - (sp as u32), id_arena);
         let right_node = Node::new(
             right_content,
@@ -915,7 +915,7 @@ impl Tree {
         self.nodes[target].size = start;
         self.nodes[target].block = IdBlock::new(node_block.low, start as u32, id_arena);
 
-        let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, (start+count+1) as u32);
+        let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, (start+count) as u32);
         let right_block = IdBlock::new(right_lo, node_block.count - ((start + count) as u32), id_arena);
 
         let right_node = Node::new(
