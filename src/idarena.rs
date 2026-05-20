@@ -1,19 +1,18 @@
 use std::cmp::Ordering;
-use ahash::AHashMap as HashMap;
 use crate::state::State;
-use rand::RngExt;
 
 pub const MIN_VALUE: u32 = 0;
 pub const MAX_VALUE: u32 = 100000;
 pub const MAX_AGENTS: u32 = 1000;
 pub type Range = (u32, u32);
+pub const TUPLE_SIZE: usize = 4;
 
 const EMPTY_OFFSET: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Identifier {
     offset: u32,
-    len: u32,
+    len: u32
 }
 
 impl Identifier {
@@ -47,308 +46,325 @@ pub enum IdOrderingRelation {
     B1EqualsB2,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum BaseRelation {
-    Diverged(Ordering),
-    Equal,
-    B1Prefix { discriminant: u32 },
-    B2Prefix { discriminant: u32 },
-}
-
-impl BaseRelation {
-    #[inline(always)]
-    fn compare(self, b1_extra: u32, b2_extra: u32) -> Ordering {
-        match self {
-            BaseRelation::Diverged(ord) => ord,
-            BaseRelation::Equal => b1_extra.cmp(&b2_extra),
-            BaseRelation::B1Prefix { discriminant } => {
-                match b1_extra.cmp(&discriminant) {
-                    Ordering::Equal => Ordering::Less,
-                    ord => ord,
-                }
-            }
-            BaseRelation::B2Prefix { discriminant } => {
-                match discriminant.cmp(&b2_extra) {
-                    Ordering::Equal => Ordering::Greater,
-                    ord => ord,
-                }
-            }
-        }
-    }
-}
+// #[derive(Clone, Copy, Debug)]
+// enum BaseRelation {
+//     Diverged(Ordering),
+//     Equal,
+//     B1Prefix { discriminant: u64 },
+//     B2Prefix { discriminant: u64 },
+// }
 
 #[derive(Clone, Debug)]
 pub struct IdArena {
-    data: Vec<u32>,
-    dedup: HashMap<u64, smallvec::SmallVec<[(u32, u32); 1]>>,
+    data: Vec<u64>,
 }
+
+/* For representing a block of identifiers 
+These have identifiers 
+a/b, a+1/b, ... and so on (for the lowest 4 tuple)
+*/
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IdBlock {
+    pub low: Identifier, 
+    pub high: Identifier, 
+    pub count: u32, // how many identifiers are in the block (including low and high)
+}
+
+impl IdBlock {
+    // pub fn new(low: Identifier, high: Identifier, count: u32) -> Self {
+    //     IdBlock { low, high, count }
+    // }
+
+    pub fn new(low: Identifier, count: u32, arena: &mut IdArena) -> Self {
+        let high = IdBlock::id_with_offset(arena, low, count-1);
+        IdBlock { low, high, count }
+    }
+
+    pub fn low<'a>(&self, arena: &'a IdArena) -> &'a [u64] {
+        arena.get_slice_unchecked(self.low)
+    }
+
+    pub fn high<'a>(&self, arena: &'a IdArena) -> &'a [u64] {
+        arena.get_slice_unchecked(self.high)
+    }
+
+    // Update lo by n 
+    pub fn truncate_start(&mut self, arena: &mut IdArena, n: u32) {
+        let low_s = arena.get_slice_unchecked(self.low);
+        let mut new_low_s = low_s.to_vec();
+        let last_idx = new_low_s.len() - TUPLE_SIZE;
+        new_low_s[last_idx] += n as u64;
+        self.low = arena.push_id(&new_low_s);
+        self.count -= n;
+    }
+
+    pub fn truncate_end(&mut self, arena: &mut IdArena, n: u32) {
+        let high_s = arena.get_slice_unchecked(self.high);
+        let mut new_high_s = high_s.to_vec();
+        let last_idx = new_high_s.len() - TUPLE_SIZE;
+        new_high_s[last_idx] -= n as u64;
+        self.high = arena.push_id(&new_high_s);
+        self.count -= n;
+    }
+
+    pub fn extend_end(&mut self, arena: &mut IdArena, n: u32) {
+        let high_s = arena.get_slice_unchecked(self.high);
+        let mut new_high_s = high_s.to_vec();
+        let last_idx = new_high_s.len() - TUPLE_SIZE;
+        new_high_s[last_idx] += n as u64;
+        self.high = arena.push_id(&new_high_s);
+        self.count += n;
+    }
+
+    pub fn id_with_offset(arena: &mut IdArena, id: Identifier, offset: u32) -> Identifier {
+        if offset == 0 {
+            return id;
+        }
+        let low_s = arena.get_slice_unchecked(id);
+        let low_len = low_s.len();
+        let mut high_s = low_s.to_vec();
+        // In the last level, we add count to the numerator, keeping the same denominator, replica and clock.
+        let last_idx = low_len - TUPLE_SIZE;
+        high_s[last_idx] += offset as u64;
+        arena.push_id(&high_s)
+    }
+}
+
 
 impl IdArena {
     pub fn new() -> Self {
         IdArena {
-            data: Vec::with_capacity(4096),
-            dedup: HashMap::with_capacity(1024),
+            data: Vec::with_capacity(4096)
         }
+    }
+
+    pub fn push_id(&mut self, path: &[u64]) -> Identifier {
+        // debug_assert!(path.len() % TUPLE_SIZE == 0);
+        let offset = self.data.len() as u32;
+        let len = path.len() as u32;
+        self.data.extend_from_slice(path);
+        Identifier { offset, len }
     }
 
     pub fn clear(&mut self) {
         self.data.clear();
-        self.dedup.clear();
-    }
-
-    pub fn intern(&mut self, path: &[u32], is_new: bool) -> Identifier {
-        if path.is_empty() { return Identifier::EMPTY; }
-
-        let hash = self.hash_slice(path);
-        let len = path.len() as u32;
-
-        if !is_new {
-            if let Some(candidates) = self.dedup.get(&hash) {
-                for &(offset, cand_len) in candidates {
-                    if cand_len == len {
-                        let stored = unsafe {
-                            self.data.get_unchecked(offset as usize..(offset as usize + len as usize))
-                        };
-                        if stored == path {
-                            return Identifier { offset, len };
-                        }
-                    }
-                }
-            }
-        }
-
-        let offset = self.data.len() as u32;
-        self.data.extend_from_slice(path);
-        self.dedup.entry(hash).or_default().push((offset, len));
-        Identifier { offset, len }
-    }
-
-    #[inline]
-    fn hash_slice(&self, path: &[u32]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = ahash::AHasher::default();
-        path.hash(&mut hasher);
-        hasher.finish()
     }
 
     #[inline(always)]
-    pub fn get_slice(&self, id: Identifier) -> &[u32] {
-        if id.is_empty() { return &[]; }
-        &self.data[id.offset as usize..(id.offset as usize + id.len as usize)]
-    }
-
-    #[inline(always)]
-    fn get_slice_unchecked(&self, id: Identifier) -> &[u32] {
+    pub fn get_slice_unchecked(&self, id: Identifier) -> &[u64] {
         debug_assert!(!id.is_empty());
         unsafe {
             self.data.get_unchecked(id.offset as usize..(id.offset as usize + id.len as usize))
         }
     }
 
+    /* 
+    Identifier format is now: 
+    Tuples of [a, b, replica, clk] where the first two components represent the rational number a/b
+    To compare two identifiers we must compare by a1*b2 and a2*b1 (as i128s)
+    If these are same, move to replica clk, and if needed more components 
+    Invariant: Size of identifier is always 4k
+    */
     #[inline]
-    fn base_relation(&self, b1: Identifier, b2: Identifier) -> BaseRelation {
-        if b1.offset == b2.offset {
-            return BaseRelation::Equal;
-        }
-
-        let sa = self.get_slice_unchecked(b1);
-        let sb = self.get_slice_unchecked(b2);
+    fn compare_ids_raw(&self, sa: &[u64], sb: &[u64]) -> Ordering {
         let sa_len = sa.len();
         let sb_len = sb.len();
         let min_len = sa_len.min(sb_len);
 
-        let sa_prefix = unsafe { sa.get_unchecked(..min_len) };
-        let sb_prefix = unsafe { sb.get_unchecked(..min_len) };
+        // Iterate in groups of 4 over both
+        for i in (0..min_len).step_by(TUPLE_SIZE) {
+            let a1 = sa[i] as u128;
+            let b1 = sa[i + 1] as u128;
+            let a2 = sb[i] as u128;
+            let b2 = sb[i + 1] as u128;
 
-        match sa_prefix.cmp(sb_prefix) {
-            Ordering::Equal => {}
-            ord => return BaseRelation::Diverged(ord),
-        }
+            let left = a1 * b2;
+            let right = a2 * b1;
 
-        match sa_len.cmp(&sb_len) {
-            Ordering::Equal => BaseRelation::Equal,
-            Ordering::Less => BaseRelation::B1Prefix {
-                discriminant: unsafe { *sb.get_unchecked(min_len) },
-            },
-            Ordering::Greater => BaseRelation::B2Prefix {
-                discriminant: unsafe { *sa.get_unchecked(min_len) },
-            },
-        }
-    }
+            match left.cmp(&right) {
+                Ordering::Less => return Ordering::Less,
+                Ordering::Greater => return Ordering::Greater,
+                Ordering::Equal => {},
+            }
 
-    #[inline]
-    pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
-        if a.offset == b.offset { return Ordering::Equal; }
-        self.get_slice_unchecked(a).cmp(self.get_slice_unchecked(b))
-    }
+            // If rational numbers are equal, compare replica and clock
+            let r_cmp = sa[i + 2].cmp(&sb[i + 2]);
+            if r_cmp != Ordering::Equal {
+                return r_cmp;
+            }
 
-    /// Compare two (base, extra) pairs. Replaces the old compare_refs(IdentifierRef, IdentifierRef).
-    #[inline]
-    pub fn compare_refs(&self, a_base: Identifier, a_extra: u32, b_base: Identifier, b_extra: u32) -> Ordering {
-        if a_base.offset == b_base.offset {
-            return a_extra.cmp(&b_extra);
-        }
-        self.base_relation(a_base, b_base).compare(a_extra, b_extra)
-    }
-
-    /// Compare two intervals given as (base, lo, hi). This is the only interval
-    /// comparison function — the old wrapper taking IdentifierInterval is removed.
-    pub fn compare_intervals(
-        &self,
-        b1_base: Identifier, b1_lo: u32, b1_hi: u32,
-        b2_base: Identifier, b2_lo: u32, b2_hi: u32,
-    ) -> IdOrderingRelation {
-        // Fast path: same base → pure offset arithmetic
-        if b1_base == b2_base {
-            if b1_lo == b2_lo && b1_hi == b2_hi {
-                return IdOrderingRelation::B1EqualsB2;
-            } else if b1_hi == b2_lo {
-                return IdOrderingRelation::B1ConcatB2;
-            } else if b2_hi == b1_lo {
-                return IdOrderingRelation::B2ConcatB1;
-            } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
-                return IdOrderingRelation::B1InsideB2;
-            } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
-                return IdOrderingRelation::B2InsideB1;
-            } else if b1_lo < b2_lo {
-                return IdOrderingRelation::B1BeforeB2;
-            } else {
-                return IdOrderingRelation::B1AfterB2;
+            let clk_cmp = sa[i + 3].cmp(&sb[i + 3]);
+            if clk_cmp != Ordering::Equal {
+                return clk_cmp;
             }
         }
 
-        let rel = self.base_relation(b1_base, b2_base);
+        return sa_len.cmp(&sb_len)
+    }
 
-        match rel.compare(b1_lo, b2_lo) {
+    pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
+        let sa = self.get_slice_unchecked(a);
+        let sb = self.get_slice_unchecked(b);
+        self.compare_ids_raw(sa, sb)
+    }
+
+    fn is_run_successor(&self, s1: &[u64], s2: &[u64]) -> bool {
+        if s1.len() != s2.len() { return false; }
+        let len = s2.len();
+        let num_idx = len - 4;
+        if s1[num_idx] + 1 != s2[num_idx] { return false; }
+        for i in 0..len {
+            if i == num_idx { continue; }
+            if s2[i] != s1[i] { return false; }
+        }
+        true
+    }
+
+    pub fn compare_intervals(&self, b1: &IdBlock, b2: &IdBlock) -> IdOrderingRelation {
+        let s1_lo = self.get_slice_unchecked(b1.low);
+        let s2_lo = self.get_slice_unchecked(b2.low);
+
+        // Slow path: different runs
+        let lo_cmp = self.compare_ids_raw(s1_lo, s2_lo);
+
+        match lo_cmp {
             Ordering::Less => {
-                if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
-                    IdOrderingRelation::B2InsideB1
-                } else {
-                    IdOrderingRelation::B1BeforeB2
+                // b1 starts before b2. Either fully before, concat, or b2 inside b1.
+                let s1_hi = self.get_slice_unchecked(b1.high);
+                let hi_lo = self.compare_ids_raw(s1_hi, s2_lo);
+                match hi_lo {
+                    Ordering::Less => {
+                        if self.is_run_successor(s1_hi, s2_lo) {
+                            IdOrderingRelation::B1ConcatB2
+                        } else {
+                            IdOrderingRelation::B1BeforeB2
+                        }
+                    }
+                    _ => IdOrderingRelation::B2InsideB1,
                 }
             }
             Ordering::Greater => {
-                if rel.compare(b1_lo, b2_hi - 1) == Ordering::Less {
-                    IdOrderingRelation::B1InsideB2
-                } else {
-                    IdOrderingRelation::B1AfterB2
+                // b1 starts after b2. Either fully after, concat, or b1 inside b2.
+                let s2_hi = self.get_slice_unchecked(b2.high);
+                let lo_hi = self.compare_ids_raw(s1_lo, s2_hi);
+                match lo_hi {
+                    Ordering::Greater => {
+                        if self.is_run_successor(s2_hi, s1_lo) {
+                            IdOrderingRelation::B2ConcatB1
+                        } else {
+                            IdOrderingRelation::B1AfterB2
+                        }
+                    }
+                    _ => IdOrderingRelation::B1InsideB2,
                 }
             }
             Ordering::Equal => {
-                IdOrderingRelation::B1BeforeB2
+                // Same start. Whoever has the longer range contains the other.
+                let s1_hi = self.get_slice_unchecked(b1.high);
+                let s2_hi = self.get_slice_unchecked(b2.high);
+                match self.compare_ids_raw(s1_hi, s2_hi) {
+                    Ordering::Equal => IdOrderingRelation::B1EqualsB2,
+                    Ordering::Less => IdOrderingRelation::B1InsideB2,
+                    Ordering::Greater => IdOrderingRelation::B2InsideB1,
+                }
             }
         }
     }
 
-    /// How many characters from `insert` can be placed before `next`.
-    /// Replaces the old num_insertable(IdentifierRef, IdentifierRef, u32).
-    pub fn num_insertable(
-        &self,
-        insert_base: Identifier, insert_extra: u32,
-        next_base: Identifier, next_extra: u32,
-        length: u32,
-    ) -> u32 {
-        let insert_slice = self.get_slice_unchecked(insert_base);
-        let next_slice = self.get_slice_unchecked(next_base);
+    /// How many identifiers in the run starting at `insert` (incrementing
+    /// deepest numerator by 0, 1, 2, ...) are ordered before `next`?
+    /// Capped at `length`.
+    pub fn num_insertable(&self, insert: Identifier, next: Identifier, length: u32) -> u32 {
+        let ins = self.get_slice_unchecked(insert);
+        let nxt = self.get_slice_unchecked(next);
+        let ins_depth = ins.len() / TUPLE_SIZE;
+        let nxt_depth = nxt.len() / TUPLE_SIZE;
 
-        let l = insert_slice.len();
+        if ins_depth > nxt_depth { return length; }
 
-        if l >= next_slice.len() + 1 { return length; }
-
-        let next_full_iter = next_slice.iter().chain(std::iter::once(&next_extra));
-        for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
-            if a != b { return length; }
+        for t in 0..(ins_depth - 1) {
+            let i = t * TUPLE_SIZE;
+            let lhs = ins[i] as u128 * nxt[i + 1] as u128;
+            let rhs = nxt[i] as u128 * ins[i + 1] as u128;
+            if lhs != rhs {
+                return if lhs < rhs { length } else { 0 };
+            }
+            if ins[i + 2] != nxt[i + 2] || ins[i + 3] != nxt[i + 3] {
+                return if (ins[i + 2], ins[i + 3]) < (nxt[i + 2], nxt[i + 3]) { length } else { 0 };
+            }
         }
 
-        let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
-        next_at_l + 1 - insert_extra
-    }
+        let d = (ins_depth - 1) * TUPLE_SIZE;
+        let gap = nxt[d] as u128 * ins[d + 1] as u128
+                - ins[d] as u128 * nxt[d + 1] as u128;
 
-    /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
-    /// Replaces the old find_split_point(&IdentifierInterval, Identifier).
-    pub fn find_split_point(
-        &self,
-        short_base: Identifier, short_lo: u32, short_hi: u32,
-        id_long: Identifier,
-    ) -> u32 {
-        if id_long.is_empty() { return 0; }
+        if gap <= 0 { return 0; }
 
-        let text_len = short_hi - short_lo;
-        if text_len == 0 { return 0; }
+        let b_nxt = nxt[d + 1] as u128;
+        let q = gap / b_nxt;
+        let r = gap % b_nxt;
 
-        let long_slice = self.get_slice_unchecked(id_long);
-        let short_slice = self.get_slice_unchecked(short_base);
-
-        let min_len = short_slice.len().min(long_slice.len());
-
-        let short_prefix = unsafe { short_slice.get_unchecked(..min_len) };
-        let long_prefix = unsafe { long_slice.get_unchecked(..min_len) };
-        match short_prefix.cmp(long_prefix) {
-            Ordering::Less  => return text_len,
-            Ordering::Greater => return 0,
-            Ordering::Equal => {}
-        }
-
-        if short_slice.len() < long_slice.len() {
-            let pivot = unsafe { *long_slice.get_unchecked(min_len) };
-            let extras_below = if long_slice.len() > min_len + 1 {
-                pivot.saturating_add(1).saturating_sub(short_lo)
-            } else {
-                pivot.saturating_sub(short_lo)
-            };
-            return extras_below.min(text_len);
+        let k = if r != 0 {
+            q + 1
+        } else if ins_depth < nxt_depth {
+            q + 1
+        } else if (ins[d + 2], ins[d + 3]) < (nxt[d + 2], nxt[d + 3]) {
+            q + 1
         } else {
-            return 0;
+            q
+        };
+
+        length.min(k as u32)
+    }
+
+    // Precondition: point is inside block.
+    pub fn find_split_point(&self, block: &IdBlock, point: Identifier) -> u32 {
+        self.num_insertable(block.low, point, block.count)
+    }   
+
+    // [2,3, r1, c1], [2,3, r1, c1, 5, 7, r2, c2]
+    // [2,3, r1, c1, .., .., r3, c3] < 5, 7 
+    // [7/10, r3, c3]
+    // FIXME
+    pub fn generate_id(&mut self, low: Identifier, high: Identifier, state: &mut State) -> Identifier {
+        let low_s = if low.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(low) };
+        let high_s = if high.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(high) };
+
+        let mut path: Vec<u64> = Vec::with_capacity(TUPLE_SIZE);
+        let max_tuples = low_s.len().max(high_s.len()) / TUPLE_SIZE + 2;
+
+        for t in 0..max_tuples {
+            let i = t * TUPLE_SIZE;
+            let (a_l, b_l) = if i + 1 < low_s.len() { (low_s[i], low_s[i + 1]) } else { (0, 1) };
+            let (a_h, b_h) = if i + 1 < high_s.len() { (high_s[i], high_s[i + 1]) } else { (MAX_VALUE as u64, 1) };
+
+            let cross_l = a_l as u128 * b_h as u128;
+            let cross_h = a_h as u128 * b_l as u128;
+
+            if cross_l < cross_h {
+                let a_m = (a_l as u128) + (a_h as u128);
+                let b_m = (b_l as u128) + (b_h as u128);
+
+                if a_m <= u64::MAX as u128 && b_m <= u64::MAX as u128 {
+                    path.extend_from_slice(&[
+                        a_m as u64, b_m as u64,
+                        state.replica as u64, state.local_clock as u64,
+                    ]);
+                    let id = self.push_id(&path);
+                    return id;
+                }
+            }
+
+            // No room or mediant overflows 
+            // go deeper
+            path.extend_from_slice(&[
+                a_l, b_l,
+                if i + 2 < low_s.len() { low_s[i + 2] } else { 0 },
+                if i + 3 < low_s.len() { low_s[i + 3] } else { 0 },
+            ]);
         }
-    }
 
-    #[inline(always)]
-    pub fn get_path(&self, id: Identifier) -> &[u32] {
-        self.get_slice(id)
-    }
-
-    pub fn get_path_owned(&self, id: Identifier) -> Vec<u32> {
-        self.get_slice(id).to_vec()
-    }
-
-    pub fn to_string(&self, id: Identifier) -> String {
-        self.get_slice(id).iter().map(|x| x.to_string()).collect::<Vec<_>>().join(".")
-    }
-
-    pub fn node_count(&self) -> usize {
-        self.dedup.values().map(|v| v.len()).sum()
-    }
-
-    pub fn arena_size(&self) -> usize {
-        self.data.len()
+        unreachable!()
     }
 }
 
-pub fn generate_base(
-    arena: &mut IdArena,
-    low_base: Identifier, low_extra: u32,
-    high_base: Identifier, high_extra: u32,
-    state: &mut State,
-) -> Identifier {
-    let low_slice = arena.get_slice(low_base);
-    let high_slice = arena.get_slice(high_base);
-
-    let mut new_path: Vec<u32> = Vec::new();
-    let mut low_iter = low_slice.iter().copied().chain(std::iter::once(low_extra));
-    let mut high_iter = high_slice.iter().copied().chain(std::iter::once(high_extra));
-
-    let mut l = low_iter.next().unwrap_or(MIN_VALUE);
-    let mut h = high_iter.next().unwrap_or(MAX_VALUE);
-
-    while (h as i32) - (l as i32) < 2 {
-        new_path.push(l);
-        l = low_iter.next().unwrap_or(MIN_VALUE);
-        h = high_iter.next().unwrap_or(MAX_VALUE);
-    }
-
-    let nxt = state.rng.random_range(l + 1..h);
-    new_path.push(nxt);
-    new_path.push(state.replica + state.local_clock * MAX_AGENTS);
-
-    arena.intern(&new_path, true)
-}

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, Range, generate_base};
+use crate::idarena::{IdArena, IdBlock, Identifier, Range, TUPLE_SIZE};
 use crate::node::Node;
 use crate::tree::{DelLocation, Path, Tree};
 use crate::state::State;
@@ -119,10 +119,9 @@ impl Document {
 
         // Some operations can now possibly be applied!
         if op.op_type == OperationType::Insert {
-            for (id, _, _) in &op.ids {
+            for id  in &op.ids {
                 let pending_ops = self.oplog.get_pending_for_id(id);
                 for op in pending_ops {
-                    // println!("Applying pending op {:?} for id {:?} at site {}", op, id, self.state.replica);
                     self.apply_op(&op);
                 }
             }
@@ -154,25 +153,23 @@ impl Document {
 
 fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, site: u32) -> Operation {
     let next = doc.blocks.next(block, path);
-    let insert_base = doc.blocks.node_base_id(block);
-    let insert_offsets = doc.blocks.node_ranges(block);
+    // let insert_base = doc.blocks.node_base_id(block);
+    // let insert_offsets = doc.blocks.node_ranges(block);
+    let insert_block = doc.blocks.node_block(block);
+    let text_len = text.chars().count() as u32;
  
     if let Some(nxt_block) = next {
-        let text_len = text.chars().count() as u32;
-        let next_base = doc.blocks.node_base_id(nxt_block);
-        let next_offsets = doc.blocks.node_ranges(nxt_block);
-        // let id_insert = IdentifierRef::new(insert_base, insert_offsets.1);
-        // let id_next   = IdentifierRef::new(next_base, next_offsets.0);
-        // let n = doc.id_trie.num_insertable(id_insert, id_next, text_len);
-        let n = doc.id_arena.num_insertable(insert_base, insert_offsets.1, next_base, next_offsets.0, text_len);
+        let next_block = doc.blocks.node_block(nxt_block);
+        let n = doc.id_arena.num_insertable(insert_block.high, next_block.low, text_len);
         if n < text_len {
-            // Can't extend — not enough room before the next block.
-            let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state);
-            let node = Node::new(text.clone(), base, 0, site);
+            // Can't extend, not enough room before the next block.
+            let new_id = doc.id_arena.generate_id(insert_block.high, next_block.low, &mut doc.state);
+            let new_block = IdBlock::new(new_id, text_len, &mut doc.id_arena);
+            let node = Node::new(text.clone(), new_block,site);
             doc.blocks.insert_after(path, node);
             return Operation {
                 op_type: OperationType::Insert,
-                ids: vec![(base, 0, 1)],
+                ids: vec![new_block],
                 payload: Some(text),
                 site,
                 clock: doc.state.local_clock,
@@ -180,10 +177,12 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
         }
     }
  
-    doc.blocks.extend_content(block, &text, path);
+    doc.blocks.extend_content(&mut doc.id_arena, block, &text, path);
+    let new_lo = IdBlock::id_with_offset(&mut doc.id_arena, insert_block.low, insert_block.count);
+    let new_block = IdBlock::new(new_lo, text_len+1, &mut doc.id_arena);
     Operation {
         op_type: OperationType::Insert,
-        ids: vec![(insert_base, insert_offsets.1, insert_offsets.1 + 1)],
+        ids: vec![new_block],
         payload: Some(text),
         site,
         clock: doc.state.local_clock,
@@ -196,62 +195,49 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
  
     let (path, covered) = doc.blocks.find_by_pos(pos);
  
-    // ── Empty tree ──────────────────────────────────────────────────────
     if path.is_empty() {
-        // let base = generate_base(
-        //     &mut doc.id_arena,
-        //     IdentifierRef::doc_start(),
-        //     IdentifierRef::doc_end(),
-        //     &mut doc.state,
-        // );
-        let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
-        let node = Node::new(text.clone(), base, 0, doc.state.replica);
+        let node_id = doc.id_arena.generate_id(Identifier::EMPTY, Identifier::EMPTY, &mut doc.state);
+        let node_block = IdBlock::new(node_id, 1, &mut doc.id_arena);
+        let node = Node::new(text.clone(), node_block, doc.state.replica);
         doc.blocks.insert_first(node);
         return Operation {
             op_type: OperationType::Insert,
-            ids: vec![(base, 0, 1)],
+            ids: vec![node_block],
             payload: Some(text),
             site: doc.state.replica,
             clock: doc.state.local_clock,
         };
     }
  
-    let block       = *path.last().unwrap();
-    let block_base  = doc.blocks.node_base_id(block);
-    let block_ranges = doc.blocks.node_ranges(block);
+    let block = *path.last().unwrap();
+    let block_base  = doc.blocks.node_block(block);
     let block_start = covered;
-    let block_end   = block_start + doc.blocks.node_size(Some(block));
+    let block_end = block_start + doc.blocks.node_size(Some(block));
  
-    // ── Insert at end of block ──────────────────────────────────────────
     if pos == block_end {
         // Try extending in-place first.
         if doc.blocks.node_creator(block) == doc.state.replica {
-            let base_ranges = doc.blocks.node_base_offsets(block);
-            if block_ranges.1 == base_ranges.1 {
-                return extend_block(doc, text, block, &path, doc.state.replica);
-            }
+            return extend_block(doc, text, block, &path, doc.state.replica);
         }
  
-        // Can't extend — create a new block after this one.
-        // let id_low = IdentifierRef::new(block_base, block_ranges.1 - 1);
-        // let base;
-        let base = match doc.blocks.next(block, &path) {
+        let node_id = match doc.blocks.next(block, &path) {
             Some(next_block) => {
-                let next_base   = doc.blocks.node_base_id(next_block);
-                let next_ranges = doc.blocks.node_ranges(next_block);
-                generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, next_base, next_ranges.0, &mut doc.state)
+                let next_block = doc.blocks.node_block(next_block);
+                doc.id_arena.generate_id(block_base.high, next_block.low, &mut doc.state)
             }
-            None => generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, Identifier::EMPTY, MAX_VALUE, &mut doc.state)
+            None => {
+                doc.id_arena.generate_id(block_base.high, Identifier::EMPTY, &mut doc.state)
+            }
         };
-        // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
-        let node = Node::new(text.clone(), base, 0, doc.state.replica);
+
+        let node_block = IdBlock::new(node_id, text.len() as u32, &mut doc.id_arena);
+        let node = Node::new(text.clone(), node_block, doc.state.replica);
  
-        // *** DIRECT: insert_after uses the path, no find_by_id ***
         doc.blocks.insert_after(&path, node);
  
         return Operation {
             op_type: OperationType::Insert,
-            ids: vec![(base, 0, 1)],
+            ids: vec![node_block],
             payload: Some(text),
             site: doc.state.replica,
             clock: doc.state.local_clock,
@@ -261,46 +247,48 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     if pos == block_start {
         let base = match doc.blocks.prev(block, &path) {
             Some(prev_block) => {
-                let prev_base   = doc.blocks.node_base_id(prev_block);
-                let prev_ranges = doc.blocks.node_ranges(prev_block);
-                // IdentifierRef::new(prev_base, prev_ranges.1 - 1)
-                generate_base(&mut doc.id_arena, prev_base, prev_ranges.1 - 1, block_base, block_ranges.0, &mut doc.state)
+                let prev_block = doc.blocks.node_block(prev_block);
+                doc.id_arena.generate_id(prev_block.high, block_base.low, &mut doc.state)
             }
-            None => generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, block_base, block_ranges.0, &mut doc.state),
+            None => {
+                doc.id_arena.generate_id(Identifier::EMPTY, block_base.low, &mut doc.state)
+            }
         };
-        // let id_high = IdentifierRef::new(block_base, block_ranges.0);
-        // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
-        let node = Node::new(text.clone(), base, 0, doc.state.replica);
+
+        let node_block = IdBlock::new(base, text.len() as u32, &mut doc.id_arena);
+        let node = Node::new(text.clone(), node_block, doc.state.replica);
  
-        // *** DIRECT: insert_before uses the path, no find_by_id ***
         doc.blocks.insert_before(&path, node);
  
         return Operation {
             op_type: OperationType::Insert,
-            ids: vec![(base, 0, 1)],
+            ids: vec![node_block],
             payload: Some(text),
             site: doc.state.replica,
             clock: doc.state.local_clock,
         };
     }
  
-    // ── Insert in the middle of a block (split) ─────────────────────────
     let sp = (pos - block_start) as u32;
-    debug_assert!(
-        sp > 0 && sp < block_ranges.1 - block_ranges.0,
-        "Invalid split point: sp={}, block_size={}",
-        sp,
-        block_ranges.1 - block_ranges.0
-    );
+    // debug_assert!(
+    //     sp > 0 && sp < block_ranges.1 - block_ranges.0,
+    //     "Invalid split point: sp={}, block_size={}",
+    //     sp,
+    //     block_ranges.1 - block_ranges.0
+    // );
+    
+    let sp_low = IdBlock::id_with_offset(&mut doc.id_arena, block_base.low, sp-1);
+    let sp_high = IdBlock::id_with_offset(&mut doc.id_arena, block_base.low, sp);
+
+    let middle_id = doc.id_arena.generate_id(sp_low, sp_high, &mut doc.state);
+    let middle_block = IdBlock::new(middle_id, text.len() as u32, &mut doc.id_arena );
+    let middle = Node::new(text.clone(), middle_block, doc.state.replica);
  
-    let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state);
-    let middle = Node::new(text.clone(), base, 0, doc.state.replica);
- 
-    doc.blocks.split_and_insert_middle(&path, sp as usize, middle);
+    doc.blocks.split_and_insert_middle(&mut doc.id_arena, &path, sp as usize, middle);
  
     Operation {
         op_type: OperationType::Insert,
-        ids: vec![(base, 0, 1)],
+        ids: vec![middle_block],
         payload: Some(text),
         site: doc.state.replica,
         clock: doc.state.local_clock,
@@ -308,19 +296,16 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
 }
 
 fn remote_insert(doc: &mut Document, op: &Operation) {
-    let val = op.ids[0].clone();
-    let base  = val.0;
-    let offset = val.1;
+    let mut id_block = op.ids[0];
     let text = op.payload.as_ref().expect("No payload for insert operation");
     let site = op.site;
-
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &doc.id_arena, base, offset, text.to_string());
+    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut id_block, text.to_string());
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     let mut num_delete = to - from;
-    let mut del_info: Vec<(Identifier, u32, u32)> = vec![];
+    let mut del_info: Vec<IdBlock> = vec![];
     let curr = from;
  
     while num_delete > 0 {
@@ -329,36 +314,41 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
             panic!("Cannot delete from an empty document");
         }
  
-        let block      = *path.last().unwrap();
-        let block_size = doc.blocks.node_size(Some(block));
+        let target = *path.last().unwrap();
+        let target_size = doc.blocks.node_size(Some(target));
         let start_del  = curr - covered;
         let end_del    = start_del + num_delete;
-        let base_id    = doc.blocks.node_base_id(block);
-        let block_ranges = doc.blocks.node_ranges(block);
+        let target_block    = doc.blocks.node_block(target);
  
-        if start_del == 0 && end_del >= block_size {
-            // ── Case 1: delete entire block ─────────────────────────────
-            del_info.push((base_id, block_ranges.0, block_ranges.1));
-            num_delete -= block_size;
+        if start_del == 0 && end_del >= target_size {
+            // Case 1: delete entire block 
+            del_info.push(target_block);
+            num_delete -= target_size;
  
             // *** DIRECT: uses path, no find_by_id ***
             doc.blocks.delete_at_path(&path);
  
         } else if start_del == 0 {
             // ── Case 2: delete from start of block ──────────────────────
-            del_info.push((base_id, block_ranges.0, block_ranges.0 + end_del as u32));
-            doc.blocks.truncate_content(block, num_delete, DelLocation::Start, &path);
+            del_info.push(IdBlock::new(target_block.low, end_del as u32, &mut doc.id_arena));
+            // del_info.push((base_id, block_ranges.0, block_ranges.0 + end_del as u32));
+            doc.blocks.truncate_content(&mut doc.id_arena, target, num_delete, DelLocation::Start, &path);
             num_delete = 0;
  
-        } else if end_del >= block_size {
-            let n = block_size - start_del;
-            del_info.push((base_id, block_ranges.0 + start_del as u32, block_ranges.1));
-            doc.blocks.truncate_content(block, n, DelLocation::End, &path);
+        } else if end_del >= target_size {
+            // Case 3: Delete from end of the block
+            let n = target_size - start_del;
+            let _id_lo = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, start_del as u32);
+            del_info.push(IdBlock::new(target_block.low, n as u32, &mut doc.id_arena));
+            doc.blocks.truncate_content(&mut doc.id_arena, target, n, DelLocation::End, &path);
             num_delete -= n;
  
         } else {
-            del_info.push((base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
-            doc.blocks.delete_middle_at_path(&path, start_del, num_delete);
+            // Case 4: Delete in the middle of the block
+            let id_lo = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, start_del as u32);
+            let _id_hi = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, end_del as u32);
+            del_info.push(IdBlock::new(id_lo, num_delete as u32, &mut doc.id_arena));
+            doc.blocks.delete_middle_at_path(&mut doc.id_arena, &path, start_del, num_delete);
             num_delete = 0;
         }
     }
@@ -372,77 +362,121 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     }
 }
 
-fn remote_delete(doc: &mut Document, op: &Operation) {
-    let del_ids = &op.ids;
-    for (id, start, end) in del_ids {
-        // start is inclusive, end is exclusive
-        let offsets_len = end - start;
-        let mut processed = 0;
-        while processed < offsets_len {
-            // FIXME: place of inefficiency
-            let path = doc.blocks.find_by_id_exact(&doc.id_arena, id.clone(), start + processed);
-            if path.is_empty() {
-                // Base id not in tree at all
-                // Buffer the entire remaining range [start+processed, end) as ONE op.
-                if doc.blocks.base_id_max_offset(*id).map_or(true, |hi| hi <= start + processed) {
-                    let partial_op = Operation {
-                        op_type: OperationType::Delete,
-                        ids: vec![(id.clone(), start + processed, *end)],
-                        payload: None,
-                        site: op.site,
-                        clock: op.clock,
-                    };
-                    doc.oplog.add_to_pending(partial_op);
-                    break; 
-                }
+// fn remote_delete(doc: &mut Document, op: &Operation) {
+//     let del_ids = &op.ids;
+//     for id_block in del_ids {
+//         // start is inclusive, end is exclusive
+//         let offsets_len = id_block.count;
+//         let mut processed = 0;
+//         while processed < offsets_len {
+//             // FIXME: place of inefficiency
+//             let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
+//             let path = doc.blocks.find_by_id_exact(&doc.id_arena, id);
+//             if path.is_empty() {
+//                 // base id exists but this offset is missing 
+//                 let missing_start = processed;
+//                 processed += 1;
+//                 while processed < offsets_len {
+//                     let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
+//                     if doc.blocks.find_by_id_exact(&doc.id_arena, id).is_empty() {
+//                         processed += 1;
+//                     } else {
+//                         break;
+//                     }
+//                 }
+//                 let buffer_lo = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, missing_start);
+//                 let buffer_count = processed - missing_start;
+//                 let partial_op = Operation {
+//                     op_type: OperationType::Delete,
+//                     ids: vec![IdBlock::new(buffer_lo, buffer_count, &mut doc.id_arena)],
+//                     payload: None,
+//                     site: op.site,
+//                     clock: op.clock,
+//                 };
+//                 doc.oplog.add_to_pending(partial_op);
+//                 continue;
 
-                // base id exists but this offset is missing 
-                let missing_start = start + processed;
+//             }
+     
+//             let target: usize = *path.last().unwrap();
+//             let target_block = doc.blocks.node_block(target);
+//             let offset = processed;
+
+//             let target_lo_s = doc.id_arena.get_slice_unchecked(target_block.low);
+//             let id_s = doc.id_arena.get_slice_unchecked(id);
+//             let num_idx = id_s.len() - TUPLE_SIZE;
+//             let offset_in_node = (id_s[num_idx] - target_lo_s[num_idx]) as u32;
+//             let n_to_delete = (target_size - offset_in_node).min(id_block.count - processed);
+
+//             // Same 4 cases as local delete
+//             if offset == block_ranges.0 && n_in_block >= block_size {
+//                 // Case 1: delete the entire block 
+//                 doc.blocks.delete_at_path(&path);
+//             } else if offset == block_ranges.0 {
+//                 doc.blocks.truncate_content(target, n_in_block as usize, DelLocation::Start, &path);
+//             } else if offset + n_in_block as u32 >= block_ranges.1 {
+//                 doc.blocks.truncate_content(target, n_in_block as usize, DelLocation::End, &path);
+//             } else {
+//                 let sp = (offset - block_ranges.0) as usize;
+//                 doc.blocks.delete_middle_at_path(&path, sp, n_in_block as usize);             
+//             }
+//             processed += n_in_block;
+//         }
+//     }
+// }
+
+fn remote_delete(doc: &mut Document, op: &Operation) {
+    for id_block in &op.ids {
+        let mut processed: u32 = 0;
+
+        while processed < id_block.count {
+            let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
+            let path = doc.blocks.find_by_id_exact(&mut doc.id_arena, id);
+
+            if path.is_empty() {
+                let missing_start = processed;
                 processed += 1;
-                while processed < offsets_len {
-                    if doc.blocks.find_by_id_exact(&doc.id_arena, *id, start + processed).is_empty() {
+                while processed < id_block.count {
+                    let next_id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
+                    if doc.blocks.find_by_id_exact(&mut doc.id_arena, next_id).is_empty() {
                         processed += 1;
                     } else {
                         break;
                     }
                 }
+                let buffer_lo = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, missing_start);
                 let partial_op = Operation {
                     op_type: OperationType::Delete,
-                    ids: vec![(id.clone(), missing_start, start + processed)],
+                    ids: vec![IdBlock::new(buffer_lo, processed - missing_start, &mut doc.id_arena)],
                     payload: None,
                     site: op.site,
                     clock: op.clock,
                 };
                 doc.oplog.add_to_pending(partial_op);
                 continue;
-
             }
-            // Verify if the base id of the blocks are the same else continue 
-            if doc.blocks.node_base_id(*path.last().unwrap()) != *id {
-                // Throw an error 
-                panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, start + processed, doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
-            }
-            let block: usize = *path.last().unwrap();
-            // let base_id = doc.blocks.node_base_id(block);
-            let block_ranges = doc.blocks.node_ranges(block);
-            let block_size = block_ranges.1 - block_ranges.0;
-            let offset = start + processed;
 
-            let n_in_block = end.min(&block_ranges.1) - offset.max(block_ranges.0);
+            let target = *path.last().unwrap();
+            let target_block = doc.blocks.node_block(target);
+            let target_size = doc.blocks.node_size(Some(target)) as u32;
 
-            // Same 4 cases as local delete
-            if offset == block_ranges.0 && n_in_block >= block_size {
-                // Case 1: delete the entire block 
+            let target_lo_s = doc.id_arena.get_slice_unchecked(target_block.low);
+            let id_s = doc.id_arena.get_slice_unchecked(id);
+            let num_idx = id_s.len() - TUPLE_SIZE;
+            let offset_in_node = (id_s[num_idx] - target_lo_s[num_idx]) as u32;
+            let chars_to_delete = (target_size - offset_in_node).min(id_block.count - processed);
+
+            if offset_in_node == 0 && chars_to_delete >= target_size {
                 doc.blocks.delete_at_path(&path);
-            } else if offset == block_ranges.0 {
-                doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::Start, &path);
-            } else if offset + n_in_block as u32 >= block_ranges.1 {
-                doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::End, &path);
+            } else if offset_in_node == 0 {
+                doc.blocks.truncate_content(&mut doc.id_arena, target, chars_to_delete as usize, DelLocation::Start, &path);
+            } else if offset_in_node + chars_to_delete >= target_size {
+                doc.blocks.truncate_content(&mut doc.id_arena, target, chars_to_delete as usize, DelLocation::End, &path);
             } else {
-                let sp = (offset - block_ranges.0) as usize;
-                doc.blocks.delete_middle_at_path(&path, sp, n_in_block as usize);             
+                doc.blocks.delete_middle_at_path(&mut doc.id_arena, &path, offset_in_node as usize, chars_to_delete as usize);
             }
-            processed += n_in_block;
+
+            processed += chars_to_delete;
         }
     }
 }
