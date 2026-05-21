@@ -114,9 +114,17 @@ fn run_insert_delete(seed: u64) {
     use rand::{SeedableRng, RngExt};
     use rand::rngs::StdRng;
 
+    println!("Running seed {}", seed);
+
+    const DEBUG: bool = false;
+
     let mut rng = StdRng::seed_from_u64(seed);
 
     let mut sys = LogootSplitSystem::new(2);
+    for doc_id in 0..2 {
+        // set debug to true 
+        // sys.network.documents[doc_id].enable_debug();
+    }
     let doc_ids = vec![0u32, 1u32];
 
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
@@ -141,6 +149,9 @@ fn run_insert_delete(seed: u64) {
             sys.ins(doc_id, pos, ch);
         }
 
+        // Print tree after operation
+        
+
         // random merge
         let a = doc_ids[rng.random_range(0..doc_ids.len())];
         let b = doc_ids[rng.random_range(0..doc_ids.len())];
@@ -148,6 +159,14 @@ fn run_insert_delete(seed: u64) {
         if a != b {
             sys.merge_from(a, b);
             sys.merge_from(b, a);
+            if DEBUG {
+                println!("Merge done, trees after merging are:");
+                println!("Tree for doc {}:", a);
+                sys.network.documents[sys.network.index_of(a)].blocks.print_tree(&sys.network.documents[sys.network.index_of(a)].id_arena);
+                println!("Tree for doc {}:", b);
+                sys.network.documents[sys.network.index_of(b)].blocks.print_tree(&sys.network.documents[sys.network.index_of(b)].id_arena);
+                println!("------------------------------");
+            }
         }
 
         let r0 = sys.read(a);
@@ -157,6 +176,17 @@ fn run_insert_delete(seed: u64) {
             println!("Divergence detected at seed {}!", seed);
             // sys.network.documents[sys.network.index_of(a)].blocks.print_tree();
             // sys.network.documents[sys.network.index_of(b)].blocks.print_tree();
+            // lets print the pending of both docs too
+            // println!("Pending ops for doc {}:", a);
+            // for (key, ops) in &sys.network.documents[sys.network.index_of(a)].
+            //     oplog.pending {
+            //     println!("Key: {:?}, Ops: {:?}", key, ops);
+            // }
+            // println!("Pending ops for doc {}:", b);
+            // for (key, ops) in &sys.network.documents[sys.network.index_of(b)]
+            //     .oplog.pending {
+            //     println!("Key: {:?}, Ops: {:?}", key, ops); 
+            // }
         }
 
         assert_eq!(
@@ -172,6 +202,7 @@ fn run_insert_delete(seed: u64) {
 
 #[test]
 fn test_insert_delete_heavy() {
+    // run_insert_delete(5170);
     for i in 0..100000 {
         // println!("Running seed {}", i);
         run_insert_delete(i);

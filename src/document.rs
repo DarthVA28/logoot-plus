@@ -48,8 +48,8 @@ impl Document {
         // println!("Inserting '{}' at pos {} at site {}", text, pos, self.state.replica);
         let op = local_insert(self, pos, text);
         if self.debug {
+            self.blocks.print_tree(&self.id_arena);
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
         }
@@ -64,8 +64,8 @@ impl Document {
         // println!("Deleting from {} to {} at site {}", from, to, self.state.replica);
         let op = local_delete(self, from, to);
         if self.debug {
+            self.blocks.print_tree(&self.id_arena);
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
@@ -109,8 +109,8 @@ impl Document {
         }
         
         if self.debug {
+            self.blocks.print_tree(&self.id_arena);
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
             }
         }
@@ -122,12 +122,12 @@ impl Document {
                     let raw_key = self.id_arena.get_slice_unchecked(id).to_vec();
                     let pending_ops = self.oplog.get_pending_for_id(&raw_key);
                     for pending_op in pending_ops {
+                        // println!("Found pending op {:?} for id {:?}, trying to apply it!", pending_op, raw_key);
                         self.apply_op(&pending_op);
                     }
                 }
             }
-}
-
+        }
 
         self.fresh = false;
     }
@@ -219,7 +219,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
  
     if pos == block_end {
         // Try extending in-place first.
-        if doc.blocks.node_creator(block) == doc.state.replica {
+        if doc.blocks.node_creator(block) == doc.state.replica && !doc.blocks.node_marked(block) {
             return extend_block(doc, text, block, &path, doc.state.replica);
         }
  
@@ -453,6 +453,7 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
                         clock: op.clock,
                     };
                     doc.oplog.add_to_pending(raw_key, pending_op);
+                    // println!("ID {:?} is missing for delete op from site {}, adding pending delete for it", missing_id, op.site);
                     processed += 1;
                 }
                 continue;

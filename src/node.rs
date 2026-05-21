@@ -10,6 +10,7 @@ pub struct Node {
     pub subtree_count: usize, // subtree count is the number of chars in the subtree rooted at this node
     pub creator: u32, // replica id of the creator
     pub block: IdBlock, // the identifier block for this node
+    pub marked: bool // whether this node can be extended or not, we set it to false if we delete from the edge of this node
 }
 
 impl Node {
@@ -23,7 +24,8 @@ impl Node {
             size: size, 
             subtree_count: size, 
             block: block,
-            creator: creator
+            creator: creator,
+            marked: false,
         }
     }
 }

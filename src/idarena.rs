@@ -302,12 +302,22 @@ impl IdArena {
 
         let k = if r != 0 {
             q + 1
-        } else if ins_depth < nxt_depth {
-            q + 1
-        } else if (ins[d + 2], ins[d + 3]) < (nxt[d + 2], nxt[d + 3]) {
-            q + 1
         } else {
-            q
+            // Rationals exactly equal at offset q — must check replica/clock
+            // just like compare_ids_raw does before falling back to length.
+            let ins_r = ins[d + 2];
+            let ins_c = ins[d + 3];
+            let nxt_r = nxt[d + 2];
+            let nxt_c = nxt[d + 3];
+            if (ins_r, ins_c) < (nxt_r, nxt_c) {
+                q + 1
+            } else if (ins_r, ins_c) > (nxt_r, nxt_c) {
+                q
+            } else if ins_depth < nxt_depth {
+                q + 1
+            } else {
+                q
+            }
         };
 
         length.min(k as u32)
@@ -317,51 +327,6 @@ impl IdArena {
     pub fn find_split_point(&self, block: &IdBlock, point: Identifier) -> u32 {
         self.num_insertable(block.low, point, block.count)
     }   
-
-    // [2,3, r1, c1], [2,3, r1, c1, 5, 7, r2, c2]
-    // [2,3, r1, c1, .., .., r3, c3] < 5, 7 
-    // [7/10, r3, c3]
-    // FIXME
-    // pub fn generate_id(&mut self, low: Identifier, high: Identifier, state: &mut State) -> Identifier {
-    //     let low_s = if low.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(low) };
-    //     let high_s = if high.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(high) };
-
-    //     let mut path: Vec<u64> = Vec::with_capacity(TUPLE_SIZE);
-    //     let max_tuples = low_s.len().max(high_s.len()) / TUPLE_SIZE + 2;
-
-    //     for t in 0..max_tuples {
-    //         let i = t * TUPLE_SIZE;
-    //         let (a_l, b_l) = if i + 1 < low_s.len() { (low_s[i], low_s[i + 1]) } else { (0, 1) };
-    //         let (a_h, b_h) = if i + 1 < high_s.len() { (high_s[i], high_s[i + 1]) } else { (MAX_VALUE as u64, 1) };
-
-    //         let cross_l = a_l as u128 * b_h as u128;
-    //         let cross_h = a_h as u128 * b_l as u128;
-
-    //         if cross_l < cross_h {
-    //             let a_m = (a_l as u128) + (a_h as u128);
-    //             let b_m = (b_l as u128) + (b_h as u128);
-
-    //             if a_m <= u64::MAX as u128 && b_m <= u64::MAX as u128 {
-    //                 path.extend_from_slice(&[
-    //                     a_m as u64, b_m as u64,
-    //                     state.replica as u64, state.local_clock as u64,
-    //                 ]);
-    //                 let id = self.push_id(&path);
-    //                 return id;
-    //             }
-    //         }
-
-    //         // No room or mediant overflows 
-    //         // go deeper
-    //         path.extend_from_slice(&[
-    //             a_l, b_l,
-    //             if i + 2 < low_s.len() { low_s[i + 2] } else { 0 },
-    //             if i + 3 < low_s.len() { low_s[i + 3] } else { 0 },
-    //         ]);
-    //     }
-
-    //     unreachable!()
-    // }
 
     // /// Check whether `id` is an actual member of the run represented by `block`.
     // /// Same depth, same prefix (all tuples except last numerator), and last

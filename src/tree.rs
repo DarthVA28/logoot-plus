@@ -87,6 +87,10 @@ impl Tree {
         self.nodes[node].creator
     }
 
+    pub fn node_marked(&self, node: usize) -> bool { 
+        self.nodes[node].marked
+    }
+
     pub fn node_block(&self, node: usize) -> IdBlock { 
         self.nodes[node].block
     }
@@ -115,7 +119,6 @@ impl Tree {
                 n.block.truncate_start(arena, num_delete as u32);
                 // n.offset += num_delete as u32;
                 /* Change the lo ID */
-                
             }
             DelLocation::End => {
                 let keep_chars = n.size - num_delete;
@@ -125,6 +128,7 @@ impl Tree {
                     .unwrap_or(n.content.len());
                 n.content.truncate(byte_off); // truncate in-place, no allocation
                 n.block.truncate_end(arena, num_delete as u32);
+                n.marked = true;
             }
         }
         n.size -= num_delete;
@@ -405,6 +409,7 @@ impl Tree {
                     let from_block_low = self.nodes[from].block.low;
                     let from_block_count = self.nodes[from].block.count;
                     let from_creator = self.nodes[from].creator;
+                    let from_marked = self.nodes[from].marked;
 
                     let from_content_ref = &self.nodes[from].content;
                     let b_idx = from_content_ref.char_indices()
@@ -421,12 +426,14 @@ impl Tree {
 
                     let original_right = self.nodes[from].right;
                     self.nodes[from].content = from_content;
+                    self.nodes[from].marked = true;
                     self.nodes[from].size = self.nodes[from].content.chars().count();
                     self.nodes[from].block = IdBlock::new(from_block_low, sp, id_arena);
                     self.nodes[from].right = Some(right_idx);
 
                     self.nodes[right_idx].right = original_right;
                     self.nodes[right_idx].left = Some(node);
+                    self.nodes[right_idx].marked = from_marked;
 
                     path.push(right_idx);
                     con = false;
@@ -489,7 +496,7 @@ impl Tree {
                     
                     node_block.truncate_end(id_arena, node_block.count - sp);
 
-                    // FIXME?
+                    // FIXME -- need to mark?
                     self.insert_by_id(site, id_arena, node_block, left_content);
                     self.insert_by_id(site, id_arena, &mut right_block, right_content);
 
@@ -581,6 +588,7 @@ impl Tree {
                 tn.block = succ_payload.block;
                 tn.size    = succ_payload.size;
                 tn.creator = succ_payload.creator;
+                tn.marked = succ_payload.marked;
 
                 let succ_right = self.nodes[succ].right;
                 self.splice(&succ_path, succ, succ_right);
@@ -644,7 +652,6 @@ impl Tree {
                 let b1_block = IdBlock::new(base, 1, id_arena);
                 let b2_block = self.nodes[curr].block;
                 id_arena.compare_intervals(&b1_block, &b2_block)
-
             };
 
             match cmp {
@@ -779,6 +786,8 @@ impl Tree {
         let original_right = target_node.right;
         target_node.content = left_content;
         target_node.size = left_size;
+        let target_marked = target_node.marked;
+        target_node.marked = true;
         
         let node_block = &mut target_node.block;
         // Create right block 
@@ -793,6 +802,7 @@ impl Tree {
         let right_idx = self.alloca(right_node);
         // Right half inherits target's original right subtree.
         self.nodes[right_idx].right = original_right;
+        self.nodes[right_idx].marked = target_marked;
 
         let _middle_block   = middle.block;
         // let middle_offset = middle.offset;
@@ -846,13 +856,14 @@ impl Tree {
                 // let succ_offset  = self.nodes[succ].offset;
                 let succ_size    = self.nodes[succ].size;
                 let succ_creator = self.nodes[succ].creator;
+                let succ_marked  = self.nodes[succ].marked;
 
                 let tn = &mut self.nodes[curr];
                 tn.content = succ_content;
                 tn.block = succ_block;
-                // tn.offset  = succ_offset;
                 tn.size    = succ_size;
                 tn.creator = succ_creator;
+                tn.marked = succ_marked;
 
                 // Delete successor 
                 let succ_right = self.nodes[succ].right;
@@ -892,6 +903,8 @@ impl Tree {
         self.nodes[target].content = left_content;
         self.nodes[target].size = start;
         self.nodes[target].block = IdBlock::new(node_block.low, start as u32, id_arena);
+        let target_marked = self.nodes[target].marked;
+        self.nodes[target].marked = true;
 
         let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, (start+count) as u32);
         let right_block = IdBlock::new(right_lo, node_block.count - ((start + count) as u32), id_arena);
@@ -905,6 +918,7 @@ impl Tree {
 
         self.nodes[right_idx].right = original_right;
         self.nodes[target].right = Some(right_idx);
+        self.nodes[right_idx].marked = target_marked;
 
         let mut extended_path: Path = Path::from_slice(path);
         extended_path.push(right_idx);
@@ -987,7 +1001,7 @@ impl Tree {
         };
 
         println!(
-            "{}{}[{}] lo={:?} hi={:?} size={} cnt={} h={} | L:{} R:{} | \"{}\" | creator={}",
+            "{}{}[{}] lo={:?} hi={:?} size={} cnt={} h={} mkd={} | L:{} R:{} | \"{}\" | creator={}",
             prefix,
             if is_last { "└──" } else { "├──" },
             idx,
@@ -997,6 +1011,7 @@ impl Tree {
             node.size,
             node.subtree_count,
             node.height,
+            node.marked,
             left,
             right,
             content,
@@ -1042,7 +1057,7 @@ impl Tree {
             if let Some(prev) = prev_id {
                 let cmp = id_arena.compare_ids(curr_block.low, prev);
                 if cmp != Ordering::Greater {
-                    eprintln!("Tree check failed: current id {:?} is not greater than previous id {:?}", curr_block.low, prev);
+                    eprintln!("Tree check failed: current id {:?} is not greater than previous id {:?}", curr_block.low(&id_arena), id_arena.get_slice_unchecked(prev));
                     return false;
                 }
             }
