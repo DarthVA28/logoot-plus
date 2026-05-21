@@ -338,23 +338,55 @@ fn test_b2_inside_b1_with_delete() {
     let mut sys = LogootSplitSystem::new(3);
 
     sys.ins(0, 0, "ABCDE".to_string());
+    // print doc 0 tree
+    println!("Site 0:");
+    sys.network.documents[0].blocks.print_tree(&sys.network.documents[0].id_arena);
+    println!("Site 0 content: '{}'", sys.network.documents[0].blocks.read());
 
     sys.merge_from(1, 0);
+    println!("Site 1 after merging from site 0:");
+    sys.network.documents[1].blocks.print_tree(&sys.network.documents[1].id_arena);
+    println!("Site 1 content: '{}'", sys.network.documents[1].blocks.read());
+
     sys.ins(1, 2, "XYZ".to_string());  // child block with 3 chars
+    println!("Site 1 after inserting child:");
+    sys.network.documents[1].blocks.print_tree(&sys.network.documents[1].id_arena);
+    println!("Site 1 content: '{}'", sys.network.documents[1].blocks.read());
 
     // Site 2 gets the child first, then deletes one char from it
     sys.merge_from(2, 1);
+    println!("Site 2 after merging from site 1:");
+    sys.network.documents[2].blocks.print_tree(&sys.network.documents[2].id_arena);
+    println!("Site 2 content: '{}'", sys.network.documents[2].blocks.read());
+
     sys.del(2, 2, 3);                  // delete 'Y' from site 2's view
+    println!("Site 2 after deleting from child:");
+    sys.network.documents[2].blocks.print_tree(&sys.network.documents[2].id_arena);
+    println!("Site 2 content: '{}'", sys.network.documents[2].blocks.read());
+
 
     // Parent arrives late on site 2
     sys.merge_from(2, 0);
+    println!("Site 2 after merging from site 0:");
+    sys.network.documents[2].blocks.print_tree(&sys.network.documents[2].id_arena);
+    println!("Site 2 content: '{}'", sys.network.documents[2].blocks.read());
 
     // Full sync
     sys.merge_from(0, 1);
+    println!("Site 0 after merging from site 1:");
+    sys.network.documents[0].blocks.print_tree(&sys.network.documents[0].id_arena);
     sys.merge_from(0, 2);
+    println!("Site 0 after merging from site 2:");
+    sys.network.documents[0].blocks.print_tree(&sys.network.documents[0].id_arena);
     sys.merge_from(1, 2);
+    println!("Site 1 after merging from site 2:");
+    sys.network.documents[1].blocks.print_tree(&sys.network.documents[1].id_arena);
     sys.merge_from(1, 0);
-    sys.merge_from(2, 1);
+    println!("Site 1 after merging from site 0:");
+    sys.network.documents[1].blocks.print_tree(&sys.network.documents[1].id_arena);
+    sys.merge_from(2, 1);   
+    println!("Site 2 after merging from site 1:");
+    sys.network.documents[2].blocks.print_tree(&sys.network.documents[2].id_arena);
 
     let r0 = sys.read(0);
     let r1 = sys.read(1);

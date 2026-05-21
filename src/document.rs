@@ -49,7 +49,7 @@ impl Document {
         let op = local_insert(self, pos, text);
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree();
+                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
         }
@@ -65,12 +65,12 @@ impl Document {
         let op = local_delete(self, from, to);
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree();
+                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
         // println!("After local delete at replica {}", self.state.replica);
-        // self.blocks.print_tree();
+        // self.blocks.print_tree(&self.id_arena);
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
@@ -110,20 +110,11 @@ impl Document {
         
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree();
+                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
             }
         }
 
-        // // Some operations can now possibly be applied!
-        // if op.op_type == OperationType::Insert {
-        //     for id  in &op.ids {
-        //         let pending_ops = self.oplog.get_pending_for_id(id);
-        //         for op in pending_ops {
-        //             self.apply_op(&op);
-        //         }
-        //     }
-        // }
         if op.op_type == OperationType::Insert {
             for id_block in &op.ids {
                 for i in 0..id_block.count {
@@ -174,7 +165,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
         let n = doc.id_arena.num_insertable(insert_block.high, next_block.low, text_len+1);
         if n < text_len + 1 {
             // Can't extend, not enough room before the next block.
-            let new_id = doc.id_arena.generate_id(insert_block.high, next_block.low, &mut doc.state);
+            let new_id = doc.id_arena.generate_id(insert_block.high, next_block.low, &mut doc.state, text_len);
             let new_block = IdBlock::new(new_id, text_len, &mut doc.id_arena);
             let node = Node::new(text.clone(), new_block,site);
             doc.blocks.insert_after(path, node);
@@ -203,12 +194,13 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
 fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     let doc_size = doc.blocks.tree_size();
     let pos = if pos > doc_size { doc_size } else { pos };
+    let text_len = text.len() as u32;
  
     let (path, covered) = doc.blocks.find_by_pos(pos);
  
     if path.is_empty() {
-        let node_id = doc.id_arena.generate_id(Identifier::EMPTY, Identifier::EMPTY, &mut doc.state);
-        let node_block = IdBlock::new(node_id, text.len() as u32, &mut doc.id_arena);
+        let node_id = doc.id_arena.generate_id(Identifier::EMPTY, Identifier::EMPTY, &mut doc.state, text_len);
+        let node_block = IdBlock::new(node_id, text_len, &mut doc.id_arena);
         let node = Node::new(text.clone(), node_block, doc.state.replica);
         doc.blocks.insert_first(node);
         return Operation {
@@ -234,14 +226,14 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         let node_id = match doc.blocks.next(block, &path) {
             Some(next_block) => {
                 let next_block = doc.blocks.node_block(next_block);
-                doc.id_arena.generate_id(block_base.high, next_block.low, &mut doc.state)
+                doc.id_arena.generate_id(block_base.high, next_block.low, &mut doc.state, text_len)
             }
             None => {
-                doc.id_arena.generate_id(block_base.high, Identifier::EMPTY, &mut doc.state)
+                doc.id_arena.generate_id(block_base.high, Identifier::EMPTY, &mut doc.state, text_len)
             }
         };
 
-        let node_block = IdBlock::new(node_id, text.len() as u32, &mut doc.id_arena);
+        let node_block = IdBlock::new(node_id, text_len, &mut doc.id_arena);
         let node = Node::new(text.clone(), node_block, doc.state.replica);
  
         doc.blocks.insert_after(&path, node);
@@ -259,14 +251,14 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         let base = match doc.blocks.prev(block, &path) {
             Some(prev_block) => {
                 let prev_block = doc.blocks.node_block(prev_block);
-                doc.id_arena.generate_id(prev_block.high, block_base.low, &mut doc.state)
+                doc.id_arena.generate_id(prev_block.high, block_base.low, &mut doc.state, text_len)
             }
             None => {
-                doc.id_arena.generate_id(Identifier::EMPTY, block_base.low, &mut doc.state)
+                doc.id_arena.generate_id(Identifier::EMPTY, block_base.low, &mut doc.state, text_len)
             }
         };
 
-        let node_block = IdBlock::new(base, text.len() as u32, &mut doc.id_arena);
+        let node_block = IdBlock::new(base, text_len, &mut doc.id_arena);
         let node = Node::new(text.clone(), node_block, doc.state.replica);
  
         doc.blocks.insert_before(&path, node);
@@ -291,8 +283,8 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     let sp_low = IdBlock::id_with_offset(&mut doc.id_arena, block_base.low, sp-1);
     let sp_high = IdBlock::id_with_offset(&mut doc.id_arena, block_base.low, sp);
 
-    let middle_id = doc.id_arena.generate_id(sp_low, sp_high, &mut doc.state);
-    let middle_block = IdBlock::new(middle_id, text.len() as u32, &mut doc.id_arena );
+    let middle_id = doc.id_arena.generate_id(sp_low, sp_high, &mut doc.state, text_len);
+    let middle_block = IdBlock::new(middle_id, text_len, &mut doc.id_arena );
     let middle = Node::new(text.clone(), middle_block, doc.state.replica);
  
     doc.blocks.split_and_insert_middle(&mut doc.id_arena, &path, sp as usize, middle);

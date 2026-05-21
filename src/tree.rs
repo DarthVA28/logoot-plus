@@ -960,23 +960,24 @@ impl<'a> Iterator for InOrderIter<'a> {
 }
 
 impl Tree {
-    pub fn print_tree(&self) {
+    pub fn print_tree(&self, id_arena: &IdArena) {
         println!("\n===== BLOCK TREE =====");
         match self.root {
-            Some(root) => self.print_node(root, "", true),
+            Some(root) => self.print_node(root, "", true, id_arena),
             None => println!("(empty)"),
         }
         println!("======================\n");
     }
 
-    fn print_node(&self, idx: usize, prefix: &str, is_last: bool) {
+    fn print_node(&self, idx: usize, prefix: &str, is_last: bool, id_arena: &IdArena) {
         let node = &self.nodes[idx];
 
         // formatting helpers
         let left = node.left.map_or("·".to_string(), |x| x.to_string());
         let right = node.right.map_or("·".to_string(), |x| x.to_string());
 
-        let base = &node.block;
+        let id_block = &node.block;
+        // let base = id_block.low;
 
         // trim content for readability
         let content = if node.content.len() > 10 {
@@ -986,11 +987,12 @@ impl Tree {
         };
 
         println!(
-            "{}{}[{}] base={:?} size={} cnt={} h={} | L:{} R:{} | \"{}\" | creator={}",
+            "{}{}[{}] lo={:?} hi={:?} size={} cnt={} h={} | L:{} R:{} | \"{}\" | creator={}",
             prefix,
             if is_last { "└──" } else { "├──" },
             idx,
-            base,
+            id_block.low(id_arena),
+            id_block.high(id_arena),
             // node.offset,
             node.size,
             node.subtree_count,
@@ -1009,14 +1011,14 @@ impl Tree {
 
         match (node.left, node.right) {
             (Some(l), Some(r)) => {
-                self.print_node(l, &new_prefix, false);
-                self.print_node(r, &new_prefix, true);
+                self.print_node(l, &new_prefix, false, id_arena);
+                self.print_node(r, &new_prefix, true, id_arena);
             }
             (Some(l), None) => {
-                self.print_node(l, &new_prefix, true);
+                self.print_node(l, &new_prefix, true, id_arena);
             }
             (None, Some(r)) => {
-                self.print_node(r, &new_prefix, true);
+                self.print_node(r, &new_prefix, true, id_arena);
             }
             (None, None) => {}
         }
