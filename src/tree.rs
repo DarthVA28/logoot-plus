@@ -91,31 +91,6 @@ impl Tree {
         self.nodes[node].block
     }
 
-    // pub fn node_base_id(&self, node: usize) -> Identifier { 
-    //     self.nodes[node].base_id
-    // }
-
-    // pub fn node_ranges(&self, node: usize) -> (u32, u32) { 
-    //     let n = &self.nodes[node];
-    //     let range_left= n.offset;
-    //     let range_right= n.offset + n.size as u32;
-    //     (range_left, range_right)
-    // }
-
-    // pub fn node_base_offsets(&self, node: usize) -> (u32, u32) { 
-    //     // Get the offsets from the map
-    //     let base_id = self.nodes[node].base_id;
-    //     if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
-    //         return (*lo, *hi)
-    //     } else {
-    //         panic!("Base offsets not found for node {}, this should not happen", node);
-    //     }
-    // }
-
-    // pub fn base_id_max_offset(&self, id: Identifier) -> Option<u32> {
-    //     self.base_to_offsets.get(&id).map(|(_, hi)| *hi)
-    // }
-
     pub fn extend_content(&mut self, arena: &mut IdArena, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);
@@ -426,44 +401,37 @@ impl Tree {
                     }
                 },
                 IdOrderingRelation::B1InsideB2 => {
-                    let (sp, b_idx, from_block, from_creator, mut from_content) = {
-                        let from_node = &self.nodes[from];
-                        let sp = id_arena.find_split_point(&from_node.block, node_block.low);
-                        let from_node = &mut self.nodes[from];
-                        let from_content_ref = &from_node.content;
-                        let b_idx = from_content_ref.char_indices()
-                            .nth(sp as usize)
-                            .map(|(idx, _)| idx)
-                            .unwrap_or(from_content_ref.len());
-                        let from_content = std::mem::take(&mut from_node.content);
-                        (sp, b_idx, &from_node.block, from_node.creator, from_content)
-                    };
+                    let sp = id_arena.find_split_point(&self.nodes[from].block, node_block.low);
+                    let from_block_low = self.nodes[from].block.low;
+                    let from_block_count = self.nodes[from].block.count;
+                    let from_creator = self.nodes[from].creator;
 
+                    let from_content_ref = &self.nodes[from].content;
+                    let b_idx = from_content_ref.char_indices()
+                        .nth(sp as usize)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(from_content_ref.len());
+
+                    let mut from_content = std::mem::take(&mut self.nodes[from].content);
                     let rcontent = from_content.split_off(b_idx);
-                    let right_lo = IdBlock::id_with_offset(id_arena, from_block.low, sp);
-                    
-                    let right_block = IdBlock::new(right_lo, from_block.count - sp, id_arena);         
-                    let right_node = Node::new(rcontent, right_block, from_creator);
 
-                    let right_idx = &self.alloca(right_node);
+                    let right_lo = IdBlock::id_with_offset(id_arena, from_block_low, sp);
+                    let right_block = IdBlock::new(right_lo, from_block_count - sp, id_arena);
+                    let right_idx = self.alloca(Node::new(rcontent, right_block, from_creator));
 
-                    let from_node = &mut self.nodes[from];
-                    let original_right = from_node.right;
-                    from_node.content = from_content;
-                    from_node.size = from_node.content.chars().count();
-                    from_node.right = Some(*right_idx);
+                    let original_right = self.nodes[from].right;
+                    self.nodes[from].content = from_content;
+                    self.nodes[from].size = self.nodes[from].content.chars().count();
+                    self.nodes[from].block = IdBlock::new(from_block_low, sp, id_arena);
+                    self.nodes[from].right = Some(right_idx);
 
-                    let right_node = &mut self.nodes[*right_idx];
-                    right_node.right = original_right;
-                    right_node.left = Some(node);
+                    self.nodes[right_idx].right = original_right;
+                    self.nodes[right_idx].left = Some(node);
 
-                    path.push(*right_idx);
+                    path.push(right_idx);
                     con = false;
                 },
                 IdOrderingRelation::B2ConcatB1 => {
-                    // let b2_base = {
-                    //     self.nodes[from].base_id
-                    // };
                     if self.node_creator(from) != site {
                         let from_node = &mut self.nodes[from];
                         if let Some(r) = from_node.right {
@@ -477,7 +445,7 @@ impl Tree {
                     let nxt = self.next(from, &path);
                     if let Some(r) = nxt {
                         let r_node = &self.nodes[r];
-                        let n_insertable = id_arena.num_insertable(node_block.high, r_node.block.low, len);
+                        let n_insertable = id_arena.num_insertable(node_block.low, r_node.block.low, len);
                         if n_insertable < len {
                             from = self.nodes[from].right.unwrap();
                         } else {
@@ -486,6 +454,7 @@ impl Tree {
                             let from_node = &mut self.nodes[from];
                             from_node.content.push_str(&content);
                             from_node.size += len as usize;
+                            from_node.block.extend_end(id_arena, len);
                             self.free(node);
                             con = false;
                         }
@@ -494,6 +463,7 @@ impl Tree {
                         let from_node = &mut self.nodes[from];
                         from_node.content.push_str(&content);
                         from_node.size = from_node.content.chars().count();
+                        from_node.block.extend_end(id_arena, len);
                         self.free(node);
                         con = false;
                     }
@@ -694,7 +664,11 @@ impl Tree {
                 }
                 IdOrderingRelation::B1EqualsB2 => {
                     // Exact interval match -- still verify
-                    if self.nodes[curr].block.low == base {
+                    // if self.nodes[curr].block.low == base {
+                    //     return path;
+                    // }
+                    let node_block = self.nodes[curr].block;
+                    if id_arena.id_in_block(base, &node_block) {
                         return path;
                     }
                     return Path::new();
@@ -703,7 +677,11 @@ impl Tree {
                     // Probe falls inside this node's range.
                     // Only a real match if the base is identical.
                     // Cannot exist elsewhere in the tree, so return empty if base differs.
-                    if self.nodes[curr].block.low == base {
+                    // if self.nodes[curr].block.low == base {
+                    //     return path;
+                    // }
+                    let node_block = self.nodes[curr].block;
+                    if id_arena.id_in_block(base, &node_block) {
                         return path;
                     }
                     return Path::new();
@@ -801,9 +779,8 @@ impl Tree {
         let original_right = target_node.right;
         target_node.content = left_content;
         target_node.size = left_size;
+        
         let node_block = &mut target_node.block;
-        node_block.truncate_end(id_arena, node_block.count - sp as u32);
-
         // Create right block 
         let right_lo = IdBlock::id_with_offset(id_arena, node_block.low, sp as u32);
         let right_block = IdBlock::new(right_lo, node_block.count - (sp as u32), id_arena);
@@ -812,6 +789,7 @@ impl Tree {
             right_block,
             creator,
         );
+        node_block.truncate_end(id_arena, node_block.count - sp as u32);
         let right_idx = self.alloca(right_node);
         // Right half inherits target's original right subtree.
         self.nodes[right_idx].right = original_right;

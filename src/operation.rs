@@ -68,7 +68,7 @@ pub struct OpId {
 pub struct OpLog { 
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
-    pub pending: HashMap<IdBlock, Vec<Operation>>
+    pub pending: HashMap<Vec<u64>, Vec<Operation>>
 }
 
 impl OpLog { 
@@ -87,14 +87,13 @@ impl OpLog {
         self.v_clock.insert(op.site, op.clock);
     }
 
-    pub fn add_to_pending(&mut self, op: Operation) {
-        // println!("Adding op {:?} to pending at site {}", op, op.site);
-        let id = op.ids[0];
-        self.pending.entry(id).or_default().push(op);   
+    pub fn add_to_pending(&mut self, key: Vec<u64>, op: Operation) {
+        self.pending.entry(key).or_default().push(op);   
     }
 
-    pub fn get_pending_for_id(&mut self, id: &IdBlock) -> Vec<Operation> {
-        self.pending.remove(id).unwrap_or_default()
+    // Change get_pending_for_id to take a raw key:
+    pub fn get_pending_for_id(&mut self, key: &[u64]) -> Vec<Operation> {
+        self.pending.remove(key).unwrap_or_default()
     }
 
     pub fn clear(&mut self) {

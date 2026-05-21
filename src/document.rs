@@ -53,9 +53,7 @@ impl Document {
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
         }
-        // println!("After local insert at replica {}", self.state.replica);
-        // self.blocks.print_tree();
-
+        
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
@@ -117,15 +115,28 @@ impl Document {
             }
         }
 
-        // Some operations can now possibly be applied!
+        // // Some operations can now possibly be applied!
+        // if op.op_type == OperationType::Insert {
+        //     for id  in &op.ids {
+        //         let pending_ops = self.oplog.get_pending_for_id(id);
+        //         for op in pending_ops {
+        //             self.apply_op(&op);
+        //         }
+        //     }
+        // }
         if op.op_type == OperationType::Insert {
-            for id  in &op.ids {
-                let pending_ops = self.oplog.get_pending_for_id(id);
-                for op in pending_ops {
-                    self.apply_op(&op);
+            for id_block in &op.ids {
+                for i in 0..id_block.count {
+                    let id = IdBlock::id_with_offset(&mut self.id_arena, id_block.low, i);
+                    let raw_key = self.id_arena.get_slice_unchecked(id).to_vec();
+                    let pending_ops = self.oplog.get_pending_for_id(&raw_key);
+                    for pending_op in pending_ops {
+                        self.apply_op(&pending_op);
+                    }
                 }
             }
-        }
+}
+
 
         self.fresh = false;
     }
@@ -160,8 +171,8 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
  
     if let Some(nxt_block) = next {
         let next_block = doc.blocks.node_block(nxt_block);
-        let n = doc.id_arena.num_insertable(insert_block.high, next_block.low, text_len);
-        if n < text_len {
+        let n = doc.id_arena.num_insertable(insert_block.high, next_block.low, text_len+1);
+        if n < text_len + 1 {
             // Can't extend, not enough room before the next block.
             let new_id = doc.id_arena.generate_id(insert_block.high, next_block.low, &mut doc.state);
             let new_block = IdBlock::new(new_id, text_len, &mut doc.id_arena);
@@ -179,7 +190,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
  
     doc.blocks.extend_content(&mut doc.id_arena, block, &text, path);
     let new_lo = IdBlock::id_with_offset(&mut doc.id_arena, insert_block.low, insert_block.count);
-    let new_block = IdBlock::new(new_lo, text_len+1, &mut doc.id_arena);
+    let new_block = IdBlock::new(new_lo, text_len, &mut doc.id_arena);
     Operation {
         op_type: OperationType::Insert,
         ids: vec![new_block],
@@ -197,7 +208,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
  
     if path.is_empty() {
         let node_id = doc.id_arena.generate_id(Identifier::EMPTY, Identifier::EMPTY, &mut doc.state);
-        let node_block = IdBlock::new(node_id, 1, &mut doc.id_arena);
+        let node_block = IdBlock::new(node_id, text.len() as u32, &mut doc.id_arena);
         let node = Node::new(text.clone(), node_block, doc.state.replica);
         doc.blocks.insert_first(node);
         return Operation {
@@ -424,7 +435,6 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
 //         }
 //     }
 // }
-
 fn remote_delete(doc: &mut Document, op: &Operation) {
     for id_block in &op.ids {
         let mut processed: u32 = 0;
@@ -434,25 +444,25 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             let path = doc.blocks.find_by_id_exact(&mut doc.id_arena, id);
 
             if path.is_empty() {
-                let missing_start = processed;
-                processed += 1;
+                // Push one pending delete per missing ID
                 while processed < id_block.count {
-                    let next_id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-                    if doc.blocks.find_by_id_exact(&mut doc.id_arena, next_id).is_empty() {
-                        processed += 1;
-                    } else {
+                    let missing_id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
+                    let check_path = doc.blocks.find_by_id_exact(&mut doc.id_arena, missing_id);
+                    if !check_path.is_empty() {
                         break;
                     }
+                    let raw_key = doc.id_arena.get_slice_unchecked(missing_id).to_vec();
+                    let single_block = IdBlock::new(missing_id, 1, &mut doc.id_arena);
+                    let pending_op = Operation {
+                        op_type: OperationType::Delete,
+                        ids: vec![single_block],
+                        payload: None,
+                        site: op.site,
+                        clock: op.clock,
+                    };
+                    doc.oplog.add_to_pending(raw_key, pending_op);
+                    processed += 1;
                 }
-                let buffer_lo = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, missing_start);
-                let partial_op = Operation {
-                    op_type: OperationType::Delete,
-                    ids: vec![IdBlock::new(buffer_lo, processed - missing_start, &mut doc.id_arena)],
-                    payload: None,
-                    site: op.site,
-                    clock: op.clock,
-                };
-                doc.oplog.add_to_pending(partial_op);
                 continue;
             }
 

@@ -71,10 +71,6 @@ pub struct IdBlock {
 }
 
 impl IdBlock {
-    // pub fn new(low: Identifier, high: Identifier, count: u32) -> Self {
-    //     IdBlock { low, high, count }
-    // }
-
     pub fn new(low: Identifier, count: u32, arena: &mut IdArena) -> Self {
         let high = IdBlock::id_with_offset(arena, low, count-1);
         IdBlock { low, high, count }
@@ -284,8 +280,8 @@ impl IdArena {
 
         for t in 0..(ins_depth - 1) {
             let i = t * TUPLE_SIZE;
-            let lhs = ins[i] as u128 * nxt[i + 1] as u128;
-            let rhs = nxt[i] as u128 * ins[i + 1] as u128;
+            let lhs = ins[i] as i128 * nxt[i + 1] as i128;
+            let rhs = nxt[i] as i128 * ins[i + 1] as i128;
             if lhs != rhs {
                 return if lhs < rhs { length } else { 0 };
             }
@@ -295,12 +291,12 @@ impl IdArena {
         }
 
         let d = (ins_depth - 1) * TUPLE_SIZE;
-        let gap = nxt[d] as u128 * ins[d + 1] as u128
-                - ins[d] as u128 * nxt[d + 1] as u128;
+        let gap = nxt[d] as i128 * ins[d + 1] as i128
+                - ins[d] as i128 * nxt[d + 1] as i128;
 
-        if gap <= 0 { return 0; }
+        if gap < 0 { return 0; }
 
-        let b_nxt = nxt[d + 1] as u128;
+        let b_nxt = nxt[d + 1] as i128;
         let q = gap / b_nxt;
         let r = gap % b_nxt;
 
@@ -327,9 +323,6 @@ impl IdArena {
     // [7/10, r3, c3]
     // FIXME
     pub fn generate_id(&mut self, low: Identifier, high: Identifier, state: &mut State) -> Identifier {
-        // Increment the local clock
-        state.local_clock += 1;
-
         let low_s = if low.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(low) };
         let high_s = if high.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(high) };
 
@@ -368,6 +361,30 @@ impl IdArena {
         }
 
         unreachable!()
+    }
+
+    // In IdArena impl
+    /// Check whether `id` is an actual member of the run represented by `block`.
+    /// Same depth, same prefix (all tuples except last numerator), and last
+    /// numerator in [lo_num, hi_num].
+    pub fn id_in_block(&self, id: Identifier, block: &IdBlock) -> bool {
+        let id_s = self.get_slice_unchecked(id);
+        let lo_s = self.get_slice_unchecked(block.low);
+        let hi_s = self.get_slice_unchecked(block.high);
+
+        if id_s.len() != lo_s.len() {
+            return false;
+        }
+
+        let num_idx = id_s.len() - TUPLE_SIZE;
+        for i in 0..id_s.len() {
+            if i == num_idx { continue; }
+            if id_s[i] != lo_s[i] {
+                return false;
+            }
+        }
+
+        id_s[num_idx] >= lo_s[num_idx] && id_s[num_idx] <= hi_s[num_idx]
     }
 }
 
