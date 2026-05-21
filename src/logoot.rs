@@ -121,12 +121,7 @@ fn run_insert_delete(seed: u64) {
     let mut rng = StdRng::seed_from_u64(seed);
 
     let mut sys = LogootSplitSystem::new(2);
-    for doc_id in 0..2 {
-        // set debug to true 
-        // sys.network.documents[doc_id].enable_debug();
-    }
     let doc_ids = vec![0u32, 1u32];
-
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
 
     for _ in 0..200 {
