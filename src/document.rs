@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::idarena::{IdArena, IdBlock, Identifier, Range, TUPLE_SIZE};
 use crate::node::Node;
 use crate::tree::{DelLocation, Path, Tree};
@@ -11,7 +9,6 @@ pub struct Document {
     pub blocks: Tree,
     pub id_arena: IdArena,
     state: State,
-    used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
     pub oplog: OpLog,
     debug: bool,
@@ -24,7 +21,6 @@ impl Document {
             blocks: Tree::new(),
             id_arena: IdArena::new(),
             state: State::new(id),
-            used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
             oplog: OpLog::new(),
             debug: false,
@@ -144,7 +140,6 @@ impl Document {
     pub fn reset (&mut self) {
         self.blocks.clear();
         self.id_arena.clear();
-        self.used_ranges_for_id.clear();
         self.snapshot.clear();
         self.oplog.clear();
         self.state.local_clock = 1;
@@ -158,7 +153,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
     // let insert_base = doc.blocks.node_base_id(block);
     // let insert_offsets = doc.blocks.node_ranges(block);
     let insert_block = doc.blocks.node_block(block);
-    let text_len = text.chars().count() as u32;
+    let text_len = text.len() as u32;
  
     if let Some(nxt_block) = next {
         let next_block = doc.blocks.node_block(nxt_block);
@@ -349,7 +344,7 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
         } else {
             // Case 4: Delete in the middle of the block
             let id_lo = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, start_del as u32);
-            let _id_hi = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, end_del as u32);
+            // let _id_hi = IdBlock::id_with_offset(&mut doc.id_arena, target_block.low, end_del as u32);
             del_info.push(IdBlock::new(id_lo, num_delete as u32, &mut doc.id_arena));
             doc.blocks.delete_middle_at_path(&mut doc.id_arena, &path, start_del, num_delete);
             num_delete = 0;
@@ -366,84 +361,87 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
 }
 
 // fn remote_delete(doc: &mut Document, op: &Operation) {
-//     let del_ids = &op.ids;
-//     for id_block in del_ids {
-//         // start is inclusive, end is exclusive
-//         let offsets_len = id_block.count;
-//         let mut processed = 0;
-//         while processed < offsets_len {
-//             // FIXME: place of inefficiency
+//     for id_block in &op.ids {
+//         let mut processed: u32 = 0;
+
+//         while processed < id_block.count {
 //             let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-//             let path = doc.blocks.find_by_id_exact(&doc.id_arena, id);
+//             let path = doc.blocks.find_by_id_exact(&mut doc.id_arena, id);
+
 //             if path.is_empty() {
-//                 // base id exists but this offset is missing 
-//                 let missing_start = processed;
-//                 processed += 1;
-//                 while processed < offsets_len {
-//                     let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-//                     if doc.blocks.find_by_id_exact(&doc.id_arena, id).is_empty() {
-//                         processed += 1;
-//                     } else {
+//                 // Push one pending delete per missing ID
+//                 while processed < id_block.count {
+//                     let missing_id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
+//                     let check_path = doc.blocks.find_by_id_exact(&mut doc.id_arena, missing_id);
+//                     if !check_path.is_empty() {
 //                         break;
 //                     }
+//                     let raw_key = doc.id_arena.get_slice_unchecked(missing_id).to_vec();
+//                     let single_block = IdBlock::new(missing_id, 1, &mut doc.id_arena);
+//                     let pending_op = Operation {
+//                         op_type: OperationType::Delete,
+//                         ids: vec![single_block],
+//                         payload: None,
+//                         site: op.site,
+//                         clock: op.clock,
+//                     };
+//                     doc.oplog.add_to_pending(raw_key, pending_op);
+//                     // println!("ID {:?} is missing for delete op from site {}, adding pending delete for it", missing_id, op.site);
+//                     processed += 1;
 //                 }
-//                 let buffer_lo = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, missing_start);
-//                 let buffer_count = processed - missing_start;
-//                 let partial_op = Operation {
-//                     op_type: OperationType::Delete,
-//                     ids: vec![IdBlock::new(buffer_lo, buffer_count, &mut doc.id_arena)],
-//                     payload: None,
-//                     site: op.site,
-//                     clock: op.clock,
-//                 };
-//                 doc.oplog.add_to_pending(partial_op);
 //                 continue;
-
 //             }
-     
-//             let target: usize = *path.last().unwrap();
+
+//             let target = *path.last().unwrap();
 //             let target_block = doc.blocks.node_block(target);
-//             let offset = processed;
+//             let target_size = doc.blocks.node_size(Some(target)) as u32;
 
 //             let target_lo_s = doc.id_arena.get_slice_unchecked(target_block.low);
 //             let id_s = doc.id_arena.get_slice_unchecked(id);
 //             let num_idx = id_s.len() - TUPLE_SIZE;
 //             let offset_in_node = (id_s[num_idx] - target_lo_s[num_idx]) as u32;
-//             let n_to_delete = (target_size - offset_in_node).min(id_block.count - processed);
+//             let chars_to_delete = (target_size - offset_in_node).min(id_block.count - processed);
 
-//             // Same 4 cases as local delete
-//             if offset == block_ranges.0 && n_in_block >= block_size {
-//                 // Case 1: delete the entire block 
+//             if offset_in_node == 0 && chars_to_delete >= target_size {
 //                 doc.blocks.delete_at_path(&path);
-//             } else if offset == block_ranges.0 {
-//                 doc.blocks.truncate_content(target, n_in_block as usize, DelLocation::Start, &path);
-//             } else if offset + n_in_block as u32 >= block_ranges.1 {
-//                 doc.blocks.truncate_content(target, n_in_block as usize, DelLocation::End, &path);
+//             } else if offset_in_node == 0 {
+//                 doc.blocks.truncate_content(&mut doc.id_arena, target, chars_to_delete as usize, DelLocation::Start, &path);
+//             } else if offset_in_node + chars_to_delete >= target_size {
+//                 doc.blocks.truncate_content(&mut doc.id_arena, target, chars_to_delete as usize, DelLocation::End, &path);
 //             } else {
-//                 let sp = (offset - block_ranges.0) as usize;
-//                 doc.blocks.delete_middle_at_path(&path, sp, n_in_block as usize);             
+//                 doc.blocks.delete_middle_at_path(&mut doc.id_arena, &path, offset_in_node as usize, chars_to_delete as usize);
 //             }
-//             processed += n_in_block;
+
+//             processed += chars_to_delete;
 //         }
 //     }
 // }
+
 fn remote_delete(doc: &mut Document, op: &Operation) {
     for id_block in &op.ids {
         let mut processed: u32 = 0;
 
+        // One Vec allocation per id_block, reused across the inner loop
+        let lo_s = doc.id_arena.get_slice_unchecked(id_block.low);
+        let mut key_buf: Vec<u64> = lo_s.to_vec();
+        let num_idx = key_buf.len() - TUPLE_SIZE;
+        let base_num = key_buf[num_idx];
+
         while processed < id_block.count {
-            let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-            let path = doc.blocks.find_by_id_exact(&mut doc.id_arena, id);
+            key_buf[num_idx] = base_num + processed as u64;
+            let path = doc.blocks.find_by_id_exact(&doc.id_arena, &key_buf);
 
             if path.is_empty() {
-                // Push one pending delete per missing ID
+                // Missing IDs — push pending deletes
                 while processed < id_block.count {
-                    let missing_id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-                    let check_path = doc.blocks.find_by_id_exact(&mut doc.id_arena, missing_id);
+                    key_buf[num_idx] = base_num + processed as u64;
+                    let check_path = doc.blocks.find_by_id_exact(&doc.id_arena, &key_buf);
                     if !check_path.is_empty() {
                         break;
                     }
-                    let raw_key = doc.id_arena.get_slice_unchecked(missing_id).to_vec();
+                    // Arena alloc here is fine — pending data must persist
+                    let missing_id = doc.id_arena.push_id(&key_buf);
+                    let raw_key = key_buf.clone();
                     let single_block = IdBlock::new(missing_id, 1, &mut doc.id_arena);
                     let pending_op = Operation {
                         op_type: OperationType::Delete,
@@ -453,7 +451,6 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
                         clock: op.clock,
                     };
                     doc.oplog.add_to_pending(raw_key, pending_op);
-                    // println!("ID {:?} is missing for delete op from site {}, adding pending delete for it", missing_id, op.site);
                     processed += 1;
                 }
                 continue;
@@ -463,10 +460,10 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
             let target_block = doc.blocks.node_block(target);
             let target_size = doc.blocks.node_size(Some(target)) as u32;
 
-            let target_lo_s = doc.id_arena.get_slice_unchecked(target_block.low);
-            let id_s = doc.id_arena.get_slice_unchecked(id);
-            let num_idx = id_s.len() - TUPLE_SIZE;
-            let offset_in_node = (id_s[num_idx] - target_lo_s[num_idx]) as u32;
+            let offset_in_node = {
+                let target_lo_s = doc.id_arena.get_slice_unchecked(target_block.low);
+                (key_buf[num_idx] - target_lo_s[num_idx]) as u32
+            };
             let chars_to_delete = (target_size - offset_in_node).min(id_block.count - processed);
 
             if offset_in_node == 0 && chars_to_delete >= target_size {

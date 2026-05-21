@@ -98,7 +98,7 @@ impl Tree {
     pub fn extend_content(&mut self, arena: &mut IdArena, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);
-        let added_size = text.chars().count();
+        let added_size = text.len();
         node.size += added_size;
         node.block.extend_end(arena, added_size as u32);
         for idx in path_to_root.iter().rev() {
@@ -361,7 +361,7 @@ impl Tree {
 
     /// Insert the node by identifier  
     pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, block: &mut IdBlock, content: String) {
-        let len = content.chars().count() as u32;
+        let len = content.len() as u32;
         let idx = self.alloca(Node::new(content, *block, site));
         if self.is_empty() {
             self.root = Some(idx);
@@ -427,7 +427,7 @@ impl Tree {
                     let original_right = self.nodes[from].right;
                     self.nodes[from].content = from_content;
                     self.nodes[from].marked = true;
-                    self.nodes[from].size = self.nodes[from].content.chars().count();
+                    self.nodes[from].size = self.nodes[from].content.len();
                     self.nodes[from].block = IdBlock::new(from_block_low, sp, id_arena);
                     self.nodes[from].right = Some(right_idx);
 
@@ -469,7 +469,7 @@ impl Tree {
                         let content = std::mem::take(&mut self.nodes[node].content);
                         let from_node = &mut self.nodes[from];
                         from_node.content.push_str(&content);
-                        from_node.size = from_node.content.chars().count();
+                        from_node.size = from_node.content.len();
                         from_node.block.extend_end(id_arena, len);
                         self.free(node);
                         con = false;
@@ -639,61 +639,95 @@ impl Tree {
         return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, id_arena: &mut IdArena, base: Identifier) -> Path {
+    // pub fn find_by_id_exact(&mut self, id_arena: &mut IdArena, base: Identifier) -> Path {
+    //     let mut path = Path::new();
+    //     if self.is_empty() {
+    //         return Path::new();
+    //     }
+    //     let mut curr = self.root.unwrap();
+
+    //     loop {
+    //         path.push(curr);
+    //         let cmp = {
+    //             let b1_block = IdBlock::new(base, 1, id_arena);
+    //             let b2_block = self.nodes[curr].block;
+    //             id_arena.compare_intervals(&b1_block, &b2_block)
+    //         };
+
+    //         match cmp {
+    //             IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
+    //                 if let Some(r) = self.nodes[curr].right {
+    //                     curr = r;
+    //                 } else {
+    //                     return Path::new();
+    //                 }
+    //             }
+    //             IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
+    //                 if let Some(l) = self.nodes[curr].left {
+    //                     curr = l;
+    //                 } else {
+    //                     return Path::new();
+    //                 }
+    //             }
+    //             IdOrderingRelation::B1EqualsB2 => {
+    //                 // Exact interval match -- still verify
+    //                 // if self.nodes[curr].block.low == base {
+    //                 //     return path;
+    //                 // }
+    //                 let node_block = self.nodes[curr].block;
+    //                 if id_arena.id_in_block(base, &node_block) {
+    //                     return path;
+    //                 }
+    //                 return Path::new();
+    //             }
+    //             IdOrderingRelation::B1InsideB2 => {
+    //                 // Probe falls inside this node's range.
+    //                 // Only a real match if the base is identical.
+    //                 // Cannot exist elsewhere in the tree, so return empty if base differs.
+    //                 // if self.nodes[curr].block.low == base {
+    //                 //     return path;
+    //                 // }
+    //                 let node_block = self.nodes[curr].block;
+    //                 if id_arena.id_in_block(base, &node_block) {
+    //                     return path;
+    //                 }
+    //                 return Path::new();
+    //             }
+    //             _ => panic!("Unexpected relation in find_by_id_exact"),
+    //         }
+    //     }
+    // }
+
+    /// Like find_by_id_exact, but takes a raw slice instead of an Identifier.
+    /// Zero arena allocations — uses compare_point_vs_block + slice_in_block.
+    pub fn find_by_id_exact(&self, id_arena: &IdArena, id_s: &[u64]) -> Path {
         let mut path = Path::new();
-        if self.is_empty() {
-            return Path::new();
-        }
-        let mut curr = self.root.unwrap();
+        let mut curr = match self.root {
+            Some(r) => r,
+            None => return path,
+        };
 
         loop {
             path.push(curr);
-            let cmp = {
-                let b1_block = IdBlock::new(base, 1, id_arena);
-                let b2_block = self.nodes[curr].block;
-                id_arena.compare_intervals(&b1_block, &b2_block)
-            };
-
-            match cmp {
-                IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
-                    if let Some(r) = self.nodes[curr].right {
-                        curr = r;
-                    } else {
-                        return Path::new();
+            match id_arena.compare_point_vs_block(id_s, &self.nodes[curr].block) {
+                Ordering::Greater => {
+                    match self.nodes[curr].right {
+                        Some(r) => curr = r,
+                        None => return Path::new(),
                     }
                 }
-                IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
-                    if let Some(l) = self.nodes[curr].left {
-                        curr = l;
-                    } else {
-                        return Path::new();
+                Ordering::Less => {
+                    match self.nodes[curr].left {
+                        Some(l) => curr = l,
+                        None => return Path::new(),
                     }
                 }
-                IdOrderingRelation::B1EqualsB2 => {
-                    // Exact interval match -- still verify
-                    // if self.nodes[curr].block.low == base {
-                    //     return path;
-                    // }
-                    let node_block = self.nodes[curr].block;
-                    if id_arena.id_in_block(base, &node_block) {
+                Ordering::Equal => {
+                    if id_arena.slice_in_block(id_s, &self.nodes[curr].block) {
                         return path;
                     }
                     return Path::new();
                 }
-                IdOrderingRelation::B1InsideB2 => {
-                    // Probe falls inside this node's range.
-                    // Only a real match if the base is identical.
-                    // Cannot exist elsewhere in the tree, so return empty if base differs.
-                    // if self.nodes[curr].block.low == base {
-                    //     return path;
-                    // }
-                    let node_block = self.nodes[curr].block;
-                    if id_arena.id_in_block(base, &node_block) {
-                        return path;
-                    }
-                    return Path::new();
-                }
-                _ => panic!("Unexpected relation in find_by_id_exact"),
             }
         }
     }
