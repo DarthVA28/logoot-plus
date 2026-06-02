@@ -153,10 +153,10 @@ impl IdArena {
 
         // Iterate in groups of 4 over both
         for i in (0..min_len).step_by(TUPLE_SIZE) {
-            let a1 = sa[i] as u128;
-            let b1 = sa[i + 1] as u128;
-            let a2 = sb[i] as u128;
-            let b2 = sb[i + 1] as u128;
+            let a1 = sa[i] as u64;
+            let b1 = sa[i + 1] as u64;
+            let a2 = sb[i] as u64;
+            let b2 = sb[i + 1] as u64;
 
             let left = a1 * b2;
             let right = a2 * b1;
