@@ -268,12 +268,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     }
  
     let sp = (pos - block_start) as u32;
-    // debug_assert!(
-    //     sp > 0 && sp < block_ranges.1 - block_ranges.0,
-    //     "Invalid split point: sp={}, block_size={}",
-    //     sp,
-    //     block_ranges.1 - block_ranges.0
-    // );
     
     let sp_low = IdBlock::id_with_offset(&mut doc.id_arena, block_base.low, sp-1);
     let sp_high = IdBlock::id_with_offset(&mut doc.id_arena, block_base.low, sp);
@@ -360,86 +354,28 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     }
 }
 
-// fn remote_delete(doc: &mut Document, op: &Operation) {
-//     for id_block in &op.ids {
-//         let mut processed: u32 = 0;
-
-//         while processed < id_block.count {
-//             let id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-//             let path = doc.blocks.find_by_id_exact(&mut doc.id_arena, id);
-
-//             if path.is_empty() {
-//                 // Push one pending delete per missing ID
-//                 while processed < id_block.count {
-//                     let missing_id = IdBlock::id_with_offset(&mut doc.id_arena, id_block.low, processed);
-//                     let check_path = doc.blocks.find_by_id_exact(&mut doc.id_arena, missing_id);
-//                     if !check_path.is_empty() {
-//                         break;
-//                     }
-//                     let raw_key = doc.id_arena.get_slice_unchecked(missing_id).to_vec();
-//                     let single_block = IdBlock::new(missing_id, 1, &mut doc.id_arena);
-//                     let pending_op = Operation {
-//                         op_type: OperationType::Delete,
-//                         ids: vec![single_block],
-//                         payload: None,
-//                         site: op.site,
-//                         clock: op.clock,
-//                     };
-//                     doc.oplog.add_to_pending(raw_key, pending_op);
-//                     // println!("ID {:?} is missing for delete op from site {}, adding pending delete for it", missing_id, op.site);
-//                     processed += 1;
-//                 }
-//                 continue;
-//             }
-
-//             let target = *path.last().unwrap();
-//             let target_block = doc.blocks.node_block(target);
-//             let target_size = doc.blocks.node_size(Some(target)) as u32;
-
-//             let target_lo_s = doc.id_arena.get_slice_unchecked(target_block.low);
-//             let id_s = doc.id_arena.get_slice_unchecked(id);
-//             let num_idx = id_s.len() - TUPLE_SIZE;
-//             let offset_in_node = (id_s[num_idx] - target_lo_s[num_idx]) as u32;
-//             let chars_to_delete = (target_size - offset_in_node).min(id_block.count - processed);
-
-//             if offset_in_node == 0 && chars_to_delete >= target_size {
-//                 doc.blocks.delete_at_path(&path);
-//             } else if offset_in_node == 0 {
-//                 doc.blocks.truncate_content(&mut doc.id_arena, target, chars_to_delete as usize, DelLocation::Start, &path);
-//             } else if offset_in_node + chars_to_delete >= target_size {
-//                 doc.blocks.truncate_content(&mut doc.id_arena, target, chars_to_delete as usize, DelLocation::End, &path);
-//             } else {
-//                 doc.blocks.delete_middle_at_path(&mut doc.id_arena, &path, offset_in_node as usize, chars_to_delete as usize);
-//             }
-
-//             processed += chars_to_delete;
-//         }
-//     }
-// }
-
 fn remote_delete(doc: &mut Document, op: &Operation) {
     for id_block in &op.ids {
         let mut processed: u32 = 0;
 
         // One Vec allocation per id_block, reused across the inner loop
         let lo_s = doc.id_arena.get_slice_unchecked(id_block.low);
-        let mut key_buf: Vec<u64> = lo_s.to_vec();
+        let mut key_buf = lo_s.to_vec();
         let num_idx = key_buf.len() - TUPLE_SIZE;
         let base_num = key_buf[num_idx];
 
         while processed < id_block.count {
-            key_buf[num_idx] = base_num + processed as u64;
+            key_buf[num_idx] = base_num + processed as u32;
             let path = doc.blocks.find_by_id_exact(&doc.id_arena, &key_buf);
 
             if path.is_empty() {
                 // Missing IDs — push pending deletes
                 while processed < id_block.count {
-                    key_buf[num_idx] = base_num + processed as u64;
+                    key_buf[num_idx] = base_num + processed as u32;
                     let check_path = doc.blocks.find_by_id_exact(&doc.id_arena, &key_buf);
                     if !check_path.is_empty() {
                         break;
                     }
-                    // Arena alloc here is fine — pending data must persist
                     let missing_id = doc.id_arena.push_id(&key_buf);
                     let raw_key = key_buf.clone();
                     let single_block = IdBlock::new(missing_id, 1, &mut doc.id_arena);

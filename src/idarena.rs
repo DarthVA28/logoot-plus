@@ -46,17 +46,9 @@ pub enum IdOrderingRelation {
     B1EqualsB2,
 }
 
-// #[derive(Clone, Copy, Debug)]
-// enum BaseRelation {
-//     Diverged(Ordering),
-//     Equal,
-//     B1Prefix { discriminant: u64 },
-//     B2Prefix { discriminant: u64 },
-// }
-
 #[derive(Clone, Debug)]
 pub struct IdArena {
-    data: Vec<u64>,
+    data: Vec<u32>,
 }
 
 /* For representing a block of identifiers 
@@ -76,72 +68,32 @@ impl IdBlock {
         IdBlock { low, high, count }
     }
 
-    pub fn low<'a>(&self, arena: &'a IdArena) -> &'a [u64] {
+    pub fn low<'a>(&self, arena: &'a IdArena) -> &'a [u32] {
         arena.get_slice_unchecked(self.low)
     }
 
-    pub fn high<'a>(&self, arena: &'a IdArena) -> &'a [u64] {
+    pub fn high<'a>(&self, arena: &'a IdArena) -> &'a [u32] {
         arena.get_slice_unchecked(self.high)
     }
-
-    // Update lo by n 
-    // pub fn truncate_start(&mut self, arena: &mut IdArena, n: u32) {
-    //     let low_s = arena.get_slice_unchecked(self.low);
-    //     let mut new_low_s = low_s.to_vec();
-    //     let last_idx = new_low_s.len() - TUPLE_SIZE;
-    //     new_low_s[last_idx] += n as u64;
-    //     self.low = arena.push_id(&new_low_s);
-    //     self.count -= n;
-    // }
-
-    // pub fn truncate_end(&mut self, arena: &mut IdArena, n: u32) {
-    //     let high_s = arena.get_slice_unchecked(self.high);
-    //     let mut new_high_s = high_s.to_vec();
-    //     let last_idx = new_high_s.len() - TUPLE_SIZE;
-    //     new_high_s[last_idx] -= n as u64;
-    //     self.high = arena.push_id(&new_high_s);
-    //     self.count -= n;
-    // }
-
-    // pub fn extend_end(&mut self, arena: &mut IdArena, n: u32) {
-    //     let high_s = arena.get_slice_unchecked(self.high);
-    //     let mut new_high_s = high_s.to_vec();
-    //     let last_idx = new_high_s.len() - TUPLE_SIZE;
-    //     new_high_s[last_idx] += n as u64;
-    //     self.high = arena.push_id(&new_high_s);
-    //     self.count += n;
-    // }
-
+    
     pub fn truncate_start(&mut self, arena: &mut IdArena, n: u32) {
-        self.low = arena.push_id_adjust_numerator(self.low, n as i64);
+        self.low = arena.push_id_adjust_numerator(self.low, n as i32);
         self.count -= n;
     }
 
     pub fn truncate_end(&mut self, arena: &mut IdArena, n: u32) {
-        self.high = arena.push_id_adjust_numerator(self.high, -(n as i64));
+        self.high = arena.push_id_adjust_numerator(self.high, -(n as i32));
         self.count -= n;
     }
 
     pub fn extend_end(&mut self, arena: &mut IdArena, n: u32) {
-        self.high = arena.push_id_adjust_numerator(self.high, n as i64);
+        self.high = arena.push_id_adjust_numerator(self.high, n as i32);
         self.count += n;
     }
 
-    // pub fn id_with_offset(arena: &mut IdArena, id: Identifier, offset: u32) -> Identifier {
-    //     if offset == 0 {
-    //         return id;
-    //     }
-    //     let low_s = arena.get_slice_unchecked(id);
-    //     let low_len = low_s.len();
-    //     let mut high_s = low_s.to_vec();
-    //     // In the last level, we add count to the numerator, keeping the same denominator, replica and clock.
-    //     let last_idx = low_len - TUPLE_SIZE;
-    //     high_s[last_idx] += offset as u64;
-    //     arena.push_id(&high_s)
-    // }
     pub fn id_with_offset(arena: &mut IdArena, id: Identifier, offset: u32) -> Identifier {
         if offset == 0 { return id; }
-        arena.push_id_adjust_numerator(id, offset as i64)
+        arena.push_id_adjust_numerator(id, offset as i32)
     }
 }
 
@@ -153,7 +105,7 @@ impl IdArena {
         }
     }
 
-    pub fn push_id(&mut self, path: &[u64]) -> Identifier {
+    pub fn push_id(&mut self, path: &[u32]) -> Identifier {
         // debug_assert!(path.len() % TUPLE_SIZE == 0);
         let offset = self.data.len() as u32;
         let len = path.len() as u32;
@@ -166,7 +118,7 @@ impl IdArena {
     }
 
     #[inline(always)]
-    pub fn get_slice_unchecked(&self, id: Identifier) -> &[u64] {
+    pub fn get_slice_unchecked(&self, id: Identifier) -> &[u32] {
         debug_assert!(!id.is_empty());
         unsafe {
             self.data.get_unchecked(id.offset as usize..(id.offset as usize + id.len as usize))
@@ -181,7 +133,20 @@ impl IdArena {
     Invariant: Size of identifier is always 4k
     */
     #[inline]
-    fn compare_ids_raw(&self, sa: &[u64], sb: &[u64]) -> Ordering {
+    fn compare_ids_raw(&self, sa: &[u32], sb: &[u32]) -> Ordering {
+        // Prefetch both slices into L1
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(sa.as_ptr() as *const i8, _MM_HINT_T0);
+            _mm_prefetch(sb.as_ptr() as *const i8, _MM_HINT_T0);
+            // Second cache line if slices are longer than 8 u64s (64 bytes)
+            // if min_len > 8 {
+            //     _mm_prefetch(sa.as_ptr().add(8) as *const i8, _MM_HINT_T0);
+            //     _mm_prefetch(sb.as_ptr().add(8) as *const i8, _MM_HINT_T0);
+            // }
+        }
+
         let sa_len = sa.len();
         let sb_len = sb.len();
         let min_len = sa_len.min(sb_len);
@@ -223,7 +188,7 @@ impl IdArena {
         self.compare_ids_raw(sa, sb)
     }
 
-    fn is_run_successor(&self, s1: &[u64], s2: &[u64]) -> bool {
+    fn is_run_successor(&self, s1: &[u32], s2: &[u32]) -> bool {
         if s1.len() != s2.len() { return false; }
         let len = s2.len();
         let num_idx = len - 4;
@@ -377,23 +342,23 @@ impl IdArena {
         state: &mut State,
         count: u32,
     ) -> Identifier {
-        let low_s = if low.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(low) };
-        let high_s = if high.is_empty() { &[] as &[u64] } else { self.get_slice_unchecked(high) };
+        let low_s = if low.is_empty() { &[] as &[u32] } else { self.get_slice_unchecked(low) };
+        let high_s = if high.is_empty() { &[] as &[u32] } else { self.get_slice_unchecked(high) };
 
-        let mut path: Vec<u64> = Vec::with_capacity(TUPLE_SIZE);
+        let mut path = Vec::with_capacity(TUPLE_SIZE);
         let max_tuples = low_s.len().max(high_s.len()) / TUPLE_SIZE + 2;
 
         for t in 0..max_tuples {
             let i = t * TUPLE_SIZE;
             let (al, bl) = if i + 1 < low_s.len()  { (low_s[i],  low_s[i + 1])  } else { (0, 1) };
-            let (ah, bh) = if i + 1 < high_s.len() { (high_s[i], high_s[i + 1]) } else { (MAX_VALUE as u64, 1) };
+            let (ah, bh) = if i + 1 < high_s.len() { (high_s[i], high_s[i + 1]) } else { (MAX_VALUE as u32, 1) };
 
-            let cross_l = al as u128 * bh as u128;
-            let cross_h = ah as u128 * bl as u128;
+            let cross_l = al as u64 * bh as u64;
+            let cross_h = ah as u64 * bl as u64;
 
             if cross_l < cross_h {
-                let (al, bl, ah, bh) = (al as u128, bl as u128, ah as u128, bh as u128);
-                let cnt = count as u128;
+                let (al, bl, ah, bh) = (al as u64, bl as u64, ah as u64, bh as u64);
+                let cnt = count as u64;
                 let gap = ah * bl - al * bh;
 
                 // Exact: smallest b_m such that count integers fit in (al/bl, ah/bh)
@@ -401,10 +366,10 @@ impl IdArena {
                 let a_m = al * b_m / bl + 1;  
                 let end = a_m + cnt - 1;
 
-                if end <= u64::MAX as u128 && b_m <= u64::MAX as u128 {
+                if end <= u32::MAX as u64 && b_m <= u32::MAX as u64 {
                     path.extend_from_slice(&[
-                        a_m as u64, b_m as u64,
-                        state.replica as u64, state.local_clock as u64,
+                        a_m as u32, b_m as u32,
+                        state.replica as u32, state.local_clock as u32,
                     ]);
                     return self.push_id(&path);
                 }
@@ -424,14 +389,14 @@ impl IdArena {
     /// Copy an identifier into the arena with the last-tuple numerator adjusted.
     /// Replaces the pattern: get_slice → to_vec → mutate → push_id.
     /// One arena copy, zero heap allocation.
-    pub fn push_id_adjust_numerator(&mut self, base: Identifier, delta: i64) -> Identifier {
+    pub fn push_id_adjust_numerator(&mut self, base: Identifier, delta: i32) -> Identifier {
         if delta == 0 { return base; }
         let len = base.len as usize;
         let offset = self.data.len() as u32;
         let src_start = base.offset as usize;
         self.data.extend_from_within(src_start..src_start + len);
         let num_idx = offset as usize + len - TUPLE_SIZE;
-        self.data[num_idx] = (self.data[num_idx] as i64 + delta) as u64;
+        self.data[num_idx] = (self.data[num_idx] as i32 + delta) as u32;
         Identifier { offset, len: base.len }
     }
 
@@ -439,7 +404,7 @@ impl IdArena {
     /// Returns Less = before block, Equal = inside block, Greater = after block.
     /// Zero arena allocations.
     #[inline]
-    pub fn compare_point_vs_block(&self, id_s: &[u64], block: &IdBlock) -> Ordering {
+    pub fn compare_point_vs_block(&self, id_s: &[u32], block: &IdBlock) -> Ordering {
         let lo_s = self.get_slice_unchecked(block.low);
         match self.compare_ids_raw(id_s, lo_s) {
             Ordering::Less => Ordering::Less,
@@ -456,7 +421,7 @@ impl IdArena {
 
     /// Check whether a raw id slice belongs to a block's run.
     /// Same logic as id_in_block but takes a slice instead of Identifier.
-    pub fn slice_in_block(&self, id_s: &[u64], block: &IdBlock) -> bool {
+    pub fn slice_in_block(&self, id_s: &[u32], block: &IdBlock) -> bool {
         let lo_s = self.get_slice_unchecked(block.low);
         let hi_s = self.get_slice_unchecked(block.high);
         if id_s.len() != lo_s.len() { return false; }

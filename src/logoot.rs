@@ -239,7 +239,6 @@ fn run_async_ops(seed: u64) {
 
         // do periodic sync_all merges (generate rng between 1-10, if 5 do a full sync)
         if rng.random_range(1..=100) == 50 {
-            // println!("Performing full sync at seed {}", seed);
             sys.network.sync_all();
 
             // Check for convergence

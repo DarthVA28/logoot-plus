@@ -700,7 +700,7 @@ impl Tree {
 
     /// Like find_by_id_exact, but takes a raw slice instead of an Identifier.
     /// Zero arena allocations — uses compare_point_vs_block + slice_in_block.
-    pub fn find_by_id_exact(&self, id_arena: &IdArena, id_s: &[u64]) -> Path {
+    pub fn find_by_id_exact(&self, id_arena: &IdArena, id_s: &[u32]) -> Path {
         let mut path = Path::new();
         let mut curr = match self.root {
             Some(r) => r,

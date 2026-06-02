@@ -1,5 +1,5 @@
-use std::collections::{HashSet, HashMap};
-// use cridarena::{Identifier, }
+use std::collections::{HashSet};
+use ahash::AHashMap as HashMap; 
 
 use crate::idarena::{IdArena, IdBlock};
 // use crate::identifier::Identifier;
@@ -22,7 +22,7 @@ pub struct Operation {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WireOperation {
     pub op_type: OperationType,
-    pub ids: Vec<(Vec<u64>, u32)>,
+    pub ids: Vec<(Vec<u32>, u32)>,
     pub payload: Option<String>,
     pub site: u32, 
     pub clock: u32
@@ -68,7 +68,7 @@ pub struct OpId {
 pub struct OpLog { 
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
-    pub pending: HashMap<Vec<u64>, Vec<Operation>>
+    pub pending: HashMap<Vec<u32>, Vec<Operation>>
 }
 
 impl OpLog { 
@@ -87,12 +87,12 @@ impl OpLog {
         self.v_clock.insert(op.site, op.clock);
     }
 
-    pub fn add_to_pending(&mut self, key: Vec<u64>, op: Operation) {
+    pub fn add_to_pending(&mut self, key: Vec<u32>, op: Operation) {
         self.pending.entry(key).or_default().push(op);   
     }
 
     // Change get_pending_for_id to take a raw key:
-    pub fn get_pending_for_id(&mut self, key: &[u64]) -> Vec<Operation> {
+    pub fn get_pending_for_id(&mut self, key: &[u32]) -> Vec<Operation> {
         self.pending.remove(key).unwrap_or_default()
     }
 
