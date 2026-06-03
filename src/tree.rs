@@ -118,6 +118,10 @@ impl Tree {
         self.base_to_offsets.get(&id).map(|(_, hi)| *hi)
     }
 
+    pub fn node_set_base_id(&mut self, node: usize, new_base: Identifier) {
+        self.nodes[node].base_id = new_base;
+    }
+
     pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
         let node = &mut self.nodes[node];
         node.content.push_str(text);
@@ -384,50 +388,69 @@ impl Tree {
     }
 
     /// Insert the node by identifier  
-    pub fn insert_by_id(&mut self, site: u32, id_arena: &IdArena, base: Identifier, offset: u32, content: String) {
+    /// Return the interned identifier
+    pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, base: &[u32], offset: u32, content: String) -> Identifier {
         let len = content.chars().count() as u32;
-        let idx = self.alloca(Node::new(content, base, offset, site)); // moved, not cloned
+        let idx = self.alloca(Node::new(content, Identifier::EMPTY, offset, site));
         if self.is_empty() {
+            let base_id = id_arena.intern(base);
+            self.node_set_base_id(idx, base_id);
             self.root = Some(idx);
-            if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
-                let new_hi = std::cmp::max(*hi, offset + len);
-                self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
-            } else {
-                self.base_to_offsets.insert(base.clone(), (offset, offset + len));
-            }
-            return;
+            self.base_to_offsets.insert(base_id, (offset, offset + len));
+            return base_id;
         }
         let from = self.root.unwrap();
-        // let insert_interval = IdentifierInterval::new(base, offset, offset + len);
-        self.insert_rec(id_arena, idx, base, offset, offset + len, from, len, site);
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
+        let base_id = self.insert_rec(id_arena, idx, base, offset, offset + len, from, len, site);
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = std::cmp::max(*hi, offset + len);
-            self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
+            self.base_to_offsets.insert(base_id.clone(), (*lo, new_hi));
         } else {
-            self.base_to_offsets.insert(base.clone(), (offset, offset + len));
+            self.base_to_offsets.insert(base_id.clone(), (offset, offset + len));
         }
+        base_id
     }
 
-    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, node_base: Identifier, node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) {
+    pub fn insert_rec(&mut self, id_arena: &mut IdArena, node: usize, node_base: &[u32], node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) -> Identifier {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
+        let mut inserted_id = Identifier::EMPTY;
 
         while con {
             path.push(from);
 
             let relation = {
                 let n = &self.nodes[from];
-                id_arena.compare_intervals(node_base, node_lo, node_hi, n.base_id, n.offset, n.offset + n.size as u32)
+                id_arena.compare_intervals_first_raw(node_base, node_lo, node_hi, n.base_id, n.offset, n.offset + n.size as u32)
             };
 
             match relation {
+                IdOrderingRelation::B1AfterB2E => {
+                    let from_node = &mut self.nodes[from];
+                    inserted_id = from_node.base_id;
+                    if let Some(r) = from_node.right {
+                        from = r;
+                        continue;
+                    } else {
+                        from_node.right = Some(node);
+                        self.node_set_base_id(node, inserted_id);
+                        con = false;
+                    }
+                }
                 IdOrderingRelation::B1AfterB2 => {
                     let from_node = &mut self.nodes[from];
                     if let Some(r) = from_node.right {
                         from = r;
                     } else {
                         from_node.right = Some(node);
+                        // Intern the identifier if not already done 
+                        if inserted_id == Identifier::EMPTY {
+                            let base_id = id_arena.intern(node_base);
+                            self.node_set_base_id(node, base_id);
+                            inserted_id = base_id;
+                        } else {
+                            self.node_set_base_id(node, inserted_id);
+                        }
                         con = false;
                     }
                 },
@@ -437,6 +460,25 @@ impl Tree {
                         from = l;
                     } else {
                         from_node.left = Some(node);
+                        // Intern the identifier
+                        if inserted_id == Identifier::EMPTY {
+                            let base_id = id_arena.intern(node_base);
+                            self.node_set_base_id(node, base_id);
+                            inserted_id = base_id;
+                        } else {
+                            self.node_set_base_id(node, inserted_id);
+                        }
+                        con = false;
+                    }
+                },
+                IdOrderingRelation::B1BeforeB2E => {
+                    let from_node = &mut self.nodes[from];
+                    inserted_id = from_node.base_id;
+                    if let Some(l) = from_node.left {
+                        from = l;
+                    } else {
+                        from_node.left = Some(node);
+                        self.node_set_base_id(node, inserted_id);
                         con = false;
                     }
                 },
@@ -444,7 +486,8 @@ impl Tree {
                     let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content) = {
                         let from_node = &self.nodes[from];
                         let f_offset = from_node.offset;
-                        let sp = id_arena.find_split_point(from_node.base_id, f_offset, f_offset + from_node.size as u32, node_base);
+                        let from_slice = id_arena.get_slice_unchecked(from_node.base_id);
+                        let sp = id_arena.find_split_point(from_slice, f_offset, f_offset + from_node.size as u32, node_base);
                         // let sp = id_arena.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
                         let from_content_ref = &from_node.content;
@@ -472,12 +515,25 @@ impl Tree {
                     right_node.left = Some(node);
 
                     path.push(*right_idx);
+
+                    // Intern the identifier for the new node
+                    if inserted_id == Identifier::EMPTY {
+                        let base_id = id_arena.intern(node_base);
+                        self.node_set_base_id(node, base_id);
+                        inserted_id = base_id;
+                    } else {
+                        self.node_set_base_id(node, inserted_id);
+                    }
+
                     con = false;
                 },
                 IdOrderingRelation::B2ConcatB1 => {
+                    // We know that the base identifier of the node is same as base of the from node 
                     let b2_base = {
                         self.nodes[from].base_id
                     };
+                    let node_base_id = b2_base;
+                    inserted_id = node_base_id;
                     if let Some((_, hi)) = self.base_to_offsets.get(&b2_base) {
                         if node_lo < *hi {
                             let from_node = &mut self.nodes[from];
@@ -506,7 +562,7 @@ impl Tree {
                         let r_offset = self.node_ranges(r).0;
                         // let id_insert = IdentifierRef::new(node_idi.base, node_idi.lo);
                         // let id_next = IdentifierRef::new(r_base, r_offset);
-                        let n_insertable = id_arena.num_insertable(node_base, node_lo, r_base, r_offset, len);
+                        let n_insertable = id_arena.num_insertable(node_base_id, node_lo, r_base, r_offset, len);
                         // let n_insertable = id_arena.num_insertable(id_insert, id_next, len);
                         if n_insertable < len {
                             from = self.nodes[from].right.unwrap();
@@ -530,12 +586,17 @@ impl Tree {
                 },
 
                 IdOrderingRelation::B1EqualsB2 => {
+                    inserted_id = {
+                        let from_node = &self.nodes[from];
+                        from_node.base_id
+                    };
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
                     let sp = {
                         let b2_base = self.nodes[from].base_id;
-                        id_arena.find_split_point(node_base, node_lo, node_hi, b2_base)
+                        let b2_slice = id_arena.get_slice_unchecked(b2_base);
+                        id_arena.find_split_point(node_base, node_lo, node_hi, b2_slice)
                     };
                     let content = std::mem::take(&mut self.nodes[node].content);
                     let byte_idx = content
@@ -547,8 +608,12 @@ impl Tree {
                     let right_content = content[byte_idx..].to_string();
                     
                     // FIXME?
-                    self.insert_by_id(site, id_arena, node_base, node_lo, left_content);
-                    self.insert_by_id(site, id_arena, node_base, node_lo + sp, right_content);
+                    let id1 = self.insert_by_id(site, id_arena, node_base, node_lo, left_content);
+                    let id2 = self.insert_by_id(site, id_arena, node_base, node_lo + sp, right_content);
+
+                    // id1 and id2 should be equal 
+                    debug_assert_eq!(id1, id2);
+                    inserted_id = id1;
 
                     self.free(node);
 
@@ -561,6 +626,14 @@ impl Tree {
                         from = l;
                     } else {
                         from_node.left = Some(node);
+                        // Intern the identifier
+                        if inserted_id == Identifier::EMPTY {
+                            let base_id = id_arena.intern(node_base);
+                            self.node_set_base_id(node, base_id);
+                            inserted_id = base_id;
+                        } else {
+                            self.node_set_base_id(node, inserted_id);
+                        }
                         con = false;
                     }
                 },
@@ -569,6 +642,8 @@ impl Tree {
         if !rec {
             self.rebalance(&path);
         }
+        return inserted_id;
+
     }
 
     pub fn splice(&mut self, path: &[usize], target: usize, replacement: Option<usize>) {
@@ -693,7 +768,7 @@ impl Tree {
         return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
+    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: &[u32], offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
@@ -710,7 +785,7 @@ impl Tree {
                 let b2_base = curr_node.base_id;
                 let b2_lo = curr_node.offset;
                 let b2_hi = b2_lo + curr_node.size as u32;
-                id_arena.compare_intervals(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
+                id_arena.compare_intervals_first_raw(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
             };
 
             match cmp {
@@ -730,16 +805,21 @@ impl Tree {
                 }
                 IdOrderingRelation::B1EqualsB2 => {
                     // Exact interval match — still verify base
-                    if self.nodes[curr].base_id == base {
+                    // println!("Probe matches node range exactly, checking base for exact match");
+                    let curr_slice = id_arena.get_slice_unchecked(self.nodes[curr].base_id);
+                    if curr_slice == base {
                         return path;
                     }
                     return Path::new();
+                    // return path;
                 }
                 IdOrderingRelation::B1InsideB2 => {
+                    // println!("Probe inside node range, checking base for exact match");
                     // Probe falls inside this node's range.
                     // Only a real match if the base is identical.
                     // Cannot exist elsewhere in the tree, so return empty if base differs.
-                    if self.nodes[curr].base_id == base {
+                    let curr_slice = id_arena.get_slice_unchecked(self.nodes[curr].base_id);
+                    if curr_slice == base {
                         return path;
                     }
                     return Path::new();
@@ -1016,16 +1096,16 @@ impl<'a> Iterator for InOrderIter<'a> {
 }
 
 impl Tree {
-    pub fn print_tree(&self) {
+    pub fn print_tree(&self, id_arena: &IdArena) {
         println!("\n===== BLOCK TREE =====");
         match self.root {
-            Some(root) => self.print_node(root, "", true),
+            Some(root) => self.print_node(id_arena, root, "", true),
             None => println!("(empty)"),
         }
         println!("======================\n");
     }
 
-    fn print_node(&self, idx: usize, prefix: &str, is_last: bool) {
+    fn print_node(&self, id_arena: &IdArena, idx: usize, prefix: &str, is_last: bool) {
         let node = &self.nodes[idx];
 
         // formatting helpers
@@ -1033,6 +1113,7 @@ impl Tree {
         let right = node.right.map_or("·".to_string(), |x| x.to_string());
 
         let base = &node.base_id;
+        let base = id_arena.get_slice_unchecked(*base);
 
         // trim content for readability
         let content = if node.content.len() > 10 {
@@ -1065,14 +1146,14 @@ impl Tree {
 
         match (node.left, node.right) {
             (Some(l), Some(r)) => {
-                self.print_node(l, &new_prefix, false);
-                self.print_node(r, &new_prefix, true);
+                self.print_node(id_arena, l, &new_prefix, false);
+                self.print_node(id_arena, r, &new_prefix, true);
             }
             (Some(l), None) => {
-                self.print_node(l, &new_prefix, true);
+                self.print_node(id_arena, l, &new_prefix, true);
             }
             (None, Some(r)) => {
-                self.print_node(r, &new_prefix, true);
+                self.print_node(id_arena, r, &new_prefix, true);
             }
             (None, None) => {}
         }

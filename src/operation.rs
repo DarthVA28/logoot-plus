@@ -40,17 +40,17 @@ impl Operation {
         }
     }
 
-    pub fn from_wire(wire: &WireOperation, arena: &mut IdArena) -> Self {
-        Operation {
-            op_type: wire.op_type,
-            ids: wire.ids.iter()
-                .map(|(path, lo, hi)| (arena.intern(path, false), *lo, *hi))
-                .collect(),
-            payload: wire.payload.clone(),
-            site: wire.site,
-            clock: wire.clock,
-        }
-    }
+    // pub fn from_wire(wire: &WireOperation, arena: &mut IdArena) -> Self {
+    //     Operation {
+    //         op_type: wire.op_type,
+    //         ids: wire.ids.iter()
+    //             .map(|(path, lo, hi)| (arena.intern(path, false), *lo, *hi))
+    //             .collect(),
+    //         payload: wire.payload.clone(),
+    //         site: wire.site,
+    //         clock: wire.clock,
+    //     }
+    // }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -64,7 +64,7 @@ pub struct OpLog {
     index: HashSet<OpId>, 
     v_clock: HashMap<u32, u32>,
     // pub pending: Vec<Operation>
-    pub pending: HashMap<Identifier, Vec<Operation>>
+    pub pending: HashMap<Vec<u32>, Vec<WireOperation>>
 }
 
 impl OpLog { 
@@ -83,13 +83,13 @@ impl OpLog {
         self.v_clock.insert(op.site, op.clock);
     }
 
-    pub fn add_to_pending(&mut self, op: Operation) {
+    pub fn add_to_pending(&mut self, op: WireOperation) {
         // println!("Adding op {:?} to pending at site {}", op, op.site);
-        let id = op.ids.first().unwrap().0;
+        let id = op.ids.first().unwrap().0.clone();
         self.pending.entry(id).or_default().push(op);   
     }
 
-    pub fn get_pending_for_id(&mut self, id: &Identifier) -> Vec<Operation> {
+    pub fn get_pending_for_id(&mut self, id: &[u32]) -> Vec<WireOperation> {
         self.pending.remove(id).unwrap_or_default()
     }
 

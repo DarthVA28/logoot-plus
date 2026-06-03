@@ -37,6 +37,7 @@ impl std::hash::Hash for Identifier {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.offset.hash(state); }
 }
 
+#[derive(Debug)]
 pub enum IdOrderingRelation {
     B1BeforeB2,
     B1AfterB2,
@@ -45,9 +46,12 @@ pub enum IdOrderingRelation {
     B1ConcatB2,
     B2ConcatB1,
     B1EqualsB2,
+    /* Two special cases: Equal bases */
+    B1BeforeB2E,
+    B1AfterB2E,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BaseRelation {
     Diverged(Ordering),
     Equal,
@@ -96,30 +100,16 @@ impl IdArena {
         self.dedup.clear();
     }
 
-    pub fn intern(&mut self, path: &[u32], is_new: bool) -> Identifier {
-        if path.is_empty() { return Identifier::EMPTY; }
+    /* 
+        The new intern function is only called when we have a *new* identifier 
+        which does not exist in the tree already
+        This prevents unnecessary double work
+    */
 
-        let hash = self.hash_slice(path);
-        let len = path.len() as u32;
-
-        if !is_new {
-            if let Some(candidates) = self.dedup.get(&hash) {
-                for &(offset, cand_len) in candidates {
-                    if cand_len == len {
-                        let stored = unsafe {
-                            self.data.get_unchecked(offset as usize..(offset as usize + len as usize))
-                        };
-                        if stored == path {
-                            return Identifier { offset, len };
-                        }
-                    }
-                }
-            }
-        }
-
+    pub fn intern(&mut self, path: &[u32]) -> Identifier {
         let offset = self.data.len() as u32;
+        let len = path.len() as u32;
         self.data.extend_from_slice(path);
-        self.dedup.entry(hash).or_default().push((offset, len));
         Identifier { offset, len }
     }
 
@@ -138,7 +128,7 @@ impl IdArena {
     }
 
     #[inline(always)]
-    fn get_slice_unchecked(&self, id: Identifier) -> &[u32] {
+    pub fn get_slice_unchecked(&self, id: Identifier) -> &[u32] {
         debug_assert!(!id.is_empty());
         unsafe {
             self.data.get_unchecked(id.offset as usize..(id.offset as usize + id.len as usize))
@@ -153,6 +143,10 @@ impl IdArena {
 
         let sa = self.get_slice_unchecked(b1);
         let sb = self.get_slice_unchecked(b2);
+        self.base_relation_raw(sa, sb)
+    }
+
+    fn base_relation_raw(&self, sa: &[u32], sb: &[u32]) -> BaseRelation {
         let sa_len = sa.len();
         let sb_len = sb.len();
         let min_len = sa_len.min(sb_len);
@@ -219,26 +213,121 @@ impl IdArena {
 
         let rel = self.base_relation(b1_base, b2_base);
 
+        if rel == BaseRelation::Equal {
+            if b1_lo == b2_lo && b1_hi == b2_hi {
+                return IdOrderingRelation::B1EqualsB2;
+            } else if b1_hi == b2_lo {
+                return IdOrderingRelation::B1ConcatB2;
+            } else if b2_hi == b1_lo {
+                return IdOrderingRelation::B2ConcatB1;
+            } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
+                return IdOrderingRelation::B1InsideB2;
+            } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
+                return IdOrderingRelation::B2InsideB1;
+            } else if b1_lo < b2_lo {
+                return IdOrderingRelation::B1BeforeB2;
+            } else {
+                return IdOrderingRelation::B1AfterB2;
+            }
+        }
+
         match rel.compare(b1_lo, b2_lo) {
             Ordering::Less => {
                 if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
                     IdOrderingRelation::B2InsideB1
                 } else {
-                    IdOrderingRelation::B1BeforeB2
+                    // Check if bases equal 
+                    if rel == BaseRelation::Equal {
+                        IdOrderingRelation::B1BeforeB2E
+                    } else {
+                        IdOrderingRelation::B1BeforeB2
+                    }
                 }
             }
             Ordering::Greater => {
                 if rel.compare(b1_lo, b2_hi - 1) == Ordering::Less {
                     IdOrderingRelation::B1InsideB2
                 } else {
-                    IdOrderingRelation::B1AfterB2
+                    // Check if bases equal
+                    if rel == BaseRelation::Equal {
+                        IdOrderingRelation::B1AfterB2E
+                    } else {
+                        IdOrderingRelation::B1AfterB2
+                    }
                 }
             }
             Ordering::Equal => {
+                if rel.compare(b1_hi-1, b2_hi-1) == Ordering::Equal {
+                    return IdOrderingRelation::B1EqualsB2;
+                }
+                // Random, check!
                 IdOrderingRelation::B1BeforeB2
             }
         }
     }
+    
+
+    // Function to compare against a raw identifier slice without interning 
+    pub fn compare_intervals_first_raw(&self, 
+        b1_base: &[u32], b1_lo: u32, b1_hi: u32,
+        b2_base: Identifier, b2_lo: u32, b2_hi: u32)
+        -> IdOrderingRelation
+    {
+        let rel = self.base_relation_raw(b1_base, self.get_slice_unchecked(b2_base));
+
+        if rel == BaseRelation::Equal {
+            if b1_lo == b2_lo && b1_hi == b2_hi {
+                return IdOrderingRelation::B1EqualsB2;
+            } else if b1_hi == b2_lo {
+                return IdOrderingRelation::B1ConcatB2;
+            } else if b2_hi == b1_lo {
+                return IdOrderingRelation::B2ConcatB1;
+            } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
+                return IdOrderingRelation::B1InsideB2;
+            } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
+                return IdOrderingRelation::B2InsideB1;
+            } else if b1_lo < b2_lo {
+                return IdOrderingRelation::B1BeforeB2;
+            } else {
+                return IdOrderingRelation::B1AfterB2;
+            }
+        }
+
+        match rel.compare(b1_lo, b2_lo) {
+            Ordering::Less => {
+                if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
+                    IdOrderingRelation::B2InsideB1
+                } else {
+                    // Check if bases equal 
+                    if rel == BaseRelation::Equal {
+                        IdOrderingRelation::B1BeforeB2E
+                    } else {
+                        IdOrderingRelation::B1BeforeB2
+                    }
+                }
+            }
+            Ordering::Greater => {
+                if rel.compare(b1_lo, b2_hi - 1) == Ordering::Less {
+                    IdOrderingRelation::B1InsideB2
+                } else {
+                    // Check if bases equal
+                    if rel == BaseRelation::Equal {
+                        IdOrderingRelation::B1AfterB2E
+                    } else {
+                        IdOrderingRelation::B1AfterB2
+                    }
+                }
+            }
+            Ordering::Equal => {
+                // if rel.compare(b1_hi-1, b2_hi-1) == Ordering::Equal {
+                //     return IdOrderingRelation::B1EqualsB2;
+                // }
+                // Random, check!
+                IdOrderingRelation::B1BeforeB2
+            }
+
+        }
+    } 
 
     /// How many characters from `insert` can be placed before `next`.
     /// Replaces the old num_insertable(IdentifierRef, IdentifierRef, u32).
@@ -265,19 +354,18 @@ impl IdArena {
     }
 
     /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
-    /// Replaces the old find_split_point(&IdentifierInterval, Identifier).
     pub fn find_split_point(
         &self,
-        short_base: Identifier, short_lo: u32, short_hi: u32,
-        id_long: Identifier,
+        short_slice: &[u32], short_lo: u32, short_hi: u32,
+        long_slice: &[u32],
     ) -> u32 {
-        if id_long.is_empty() { return 0; }
+        if long_slice.is_empty() { return 0; }
 
         let text_len = short_hi - short_lo;
         if text_len == 0 { return 0; }
 
-        let long_slice = self.get_slice_unchecked(id_long);
-        let short_slice = self.get_slice_unchecked(short_base);
+        // let long_slice = self.get_slice_unchecked(id_long);
+        // let short_slice = self.get_slice_unchecked(short_base);
 
         let min_len = short_slice.len().min(long_slice.len());
 
@@ -350,5 +438,5 @@ pub fn generate_base(
     new_path.push(nxt);
     new_path.push(state.replica + state.local_clock * MAX_AGENTS);
 
-    arena.intern(&new_path, true)
+    arena.intern(&new_path)
 }

@@ -49,12 +49,12 @@ impl Document {
         let op = local_insert(self, pos, text);
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree();
+                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
         }
         // println!("After local insert at replica {}", self.state.replica);
-        // self.blocks.print_tree();
+        // self.blocks.print_tree(&self.id_arena);
 
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
@@ -67,12 +67,12 @@ impl Document {
         let op = local_delete(self, from, to);
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree();
+                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
         // println!("After local delete at replica {}", self.state.replica);
-        // self.blocks.print_tree();
+        // self.blocks.print_tree(&self.id_arena);
         self.oplog.record_op(&op);
         self.state.local_clock += 1;
         self.fresh = false;
@@ -93,26 +93,30 @@ impl Document {
     }
 
     pub fn apply_remote_op(&mut self, wire_op: &WireOperation) {
-        let op = Operation::from_wire(wire_op, &mut self.id_arena);
-        self.apply_op(&op);
+        // let op = Operation::from_wire(wire_op, &mut self.id_arena);
+        self.apply_op(wire_op);
     }
 
-    pub fn apply_op(&mut self, op: &Operation) {
+    pub fn apply_op(&mut self, op: &WireOperation) {
         // We are ready to apply this operation, first record it in the oplog and then apply it
+        // let ins_id = Identifier::EMPTY;
+        // println!("Applying op {:?} from site {} at site {}", op, op.site, self.state.replica);
+
         match op.op_type {
             OperationType::Insert => {
-                // println!("Applying remote insert of '{}' with id {:?} at site {} at site {}", op.payload.as_ref().unwrap(), op.ids, op.site, self.state.replica);
-                remote_insert(self, &op)
+                remote_insert(self, &op);
             },
             OperationType::Delete => {
-                // println!("Applying remote delete of ids {:?} at site {} at site {}", op.ids, op.site, self.state.replica);
                 remote_delete(self, &op)
             }
         }
+
+        // println!("After applying op {:?} from site {} at site {}", op, op.site, self.state.replica);
+        // self.blocks.print_tree(&self.id_arena);
         
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree();
+                self.blocks.print_tree(&self.id_arena);
                 panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
             }
         }
@@ -122,7 +126,6 @@ impl Document {
             for (id, _, _) in &op.ids {
                 let pending_ops = self.oplog.get_pending_for_id(id);
                 for op in pending_ops {
-                    // println!("Applying pending op {:?} for id {:?} at site {}", op, id, self.state.replica);
                     self.apply_op(&op);
                 }
             }
@@ -198,12 +201,6 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
  
     // ── Empty tree ──────────────────────────────────────────────────────
     if path.is_empty() {
-        // let base = generate_base(
-        //     &mut doc.id_arena,
-        //     IdentifierRef::doc_start(),
-        //     IdentifierRef::doc_end(),
-        //     &mut doc.state,
-        // );
         let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
         doc.blocks.insert_first(node);
@@ -307,7 +304,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     }
 }
 
-fn remote_insert(doc: &mut Document, op: &Operation) {
+fn remote_insert(doc: &mut Document, op: &WireOperation) -> Identifier {
     let val = op.ids[0].clone();
     let base  = val.0;
     let offset = val.1;
@@ -315,7 +312,7 @@ fn remote_insert(doc: &mut Document, op: &Operation) {
     let site = op.site;
 
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &doc.id_arena, base, offset, text.to_string());
+    doc.blocks.insert_by_id(site, &mut doc.id_arena, &base, offset, text.to_string())
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
@@ -372,41 +369,42 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
     }
 }
 
-fn remote_delete(doc: &mut Document, op: &Operation) {
+fn remote_delete(doc: &mut Document, op: &WireOperation) {
     let del_ids = &op.ids;
     for (id, start, end) in del_ids {
+        // println!("Remote delete of id {:?} from offset {} to {} at site {} at replica {}", id, start, end, op.site, doc.state.replica);
         // start is inclusive, end is exclusive
         let offsets_len = end - start;
         let mut processed = 0;
         while processed < offsets_len {
             // FIXME: place of inefficiency
-            let path = doc.blocks.find_by_id_exact(&doc.id_arena, id.clone(), start + processed);
+            let path = doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed);
             if path.is_empty() {
                 // Base id not in tree at all
                 // Buffer the entire remaining range [start+processed, end) as ONE op.
-                if doc.blocks.base_id_max_offset(*id).map_or(true, |hi| hi <= start + processed) {
-                    let partial_op = Operation {
-                        op_type: OperationType::Delete,
-                        ids: vec![(id.clone(), start + processed, *end)],
-                        payload: None,
-                        site: op.site,
-                        clock: op.clock,
-                    };
-                    doc.oplog.add_to_pending(partial_op);
-                    break; 
-                }
+                // if doc.blocks.base_id_max_offset(*id).map_or(true, |hi| hi <= start + processed) {
+                //     let partial_op = WireOperation {
+                //         op_type: OperationType::Delete,
+                //         ids: vec![(id.clone(), start + processed, *end)],
+                //         payload: None,
+                //         site: op.site,
+                //         clock: op.clock,
+                //     };
+                //     doc.oplog.add_to_pending(partial_op);
+                //     break; 
+                // }
 
                 // base id exists but this offset is missing 
                 let missing_start = start + processed;
                 processed += 1;
                 while processed < offsets_len {
-                    if doc.blocks.find_by_id_exact(&doc.id_arena, *id, start + processed).is_empty() {
+                    if doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed).is_empty() {
                         processed += 1;
                     } else {
                         break;
                     }
                 }
-                let partial_op = Operation {
+                let partial_op = WireOperation {
                     op_type: OperationType::Delete,
                     ids: vec![(id.clone(), missing_start, start + processed)],
                     payload: None,
@@ -418,10 +416,10 @@ fn remote_delete(doc: &mut Document, op: &Operation) {
 
             }
             // Verify if the base id of the blocks are the same else continue 
-            if doc.blocks.node_base_id(*path.last().unwrap()) != *id {
-                // Throw an error 
-                panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, start + processed, doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
-            }
+            // if doc.blocks.node_base_id(*path.last().unwrap()) != *id {
+            //     // Throw an error 
+            //     panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, start + processed, doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
+            // }
             let block: usize = *path.last().unwrap();
             // let base_id = doc.blocks.node_base_id(block);
             let block_ranges = doc.blocks.node_ranges(block);
