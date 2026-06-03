@@ -113,14 +113,6 @@ impl IdArena {
         Identifier { offset, len }
     }
 
-    #[inline]
-    fn hash_slice(&self, path: &[u32]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = ahash::AHasher::default();
-        path.hash(&mut hasher);
-        hasher.finish()
-    }
-
     #[inline(always)]
     pub fn get_slice(&self, id: Identifier) -> &[u32] {
         if id.is_empty() { return &[]; }
