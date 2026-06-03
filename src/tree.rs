@@ -408,7 +408,7 @@ impl Tree {
         }
     }
 
-    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, mut node_base: Identifier, node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) {
+    pub fn insert_rec(&mut self, id_arena: &IdArena, node: usize, node_base: Identifier, node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
