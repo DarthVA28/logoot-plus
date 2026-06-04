@@ -421,7 +421,7 @@ impl Tree {
 
             let relation = {
                 let n = &self.nodes[from];
-                id_arena.compare_intervals_first_raw(node_base, node_lo, node_hi, n.base_id, n.offset, n.offset + n.size as u32)
+                id_arena.compare_intervals(node_base, node_lo, node_hi, n.base_id, n.offset, n.offset + n.size as u32)
             };
 
             match relation {
@@ -668,106 +668,6 @@ impl Tree {
         self.rebalance(&path[..path.len()-1]);
     }
 
-    pub fn delete_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Result<(), ()> {
-        // let mut path: Vec<usize> = vec![];
-        if self.is_empty() {
-            return Err(())
-        }
-        let path= self.find_by_id(id_arena, base, offset);
-        if path.is_empty() {
-            return Err(());
-        } 
-
-        let curr = *path.last().unwrap();
-
-        // Found the block to delete, delete the entire thing 
-        let target = &self.nodes[curr];
-        let left = target.left;
-        let right: Option<usize> = target.right;
-
-        match (left, right) {
-            (None, None) => {
-                // No children, just delete
-                self.splice(&path, curr, None);
-            },
-
-            (Some(child), None) | (None, Some(child)) => {
-                self.splice(&path, curr, Some(child));
-            },
-
-            (Some(_), Some(r)) => {
-                let delete_idx = curr;
-                let mut succ_path = path.clone();
-                succ_path.push(r);
-                let mut curr = r;
-
-                while let Some(l) = self.nodes[curr].left {
-                    succ_path.push(l);
-                    curr = l;
-                }
-
-                let succ = curr;
-                let succ_payload = self.nodes[succ].clone();
-                let tn = &mut self.nodes[delete_idx];
-                tn.content = succ_payload.content;
-                tn.base_id = succ_payload.base_id;
-                tn.offset  = succ_payload.offset;
-                tn.size    = succ_payload.size;
-                tn.creator = succ_payload.creator;
-
-                let succ_right = self.nodes[succ].right;
-                self.splice(&succ_path, succ, succ_right);
-            }
-        }
-         Ok(())
-    }
-
-    pub fn find_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
-        let mut path = Path::new();
-        if self.is_empty() {
-            return Path::new();
-        }
-        let mut curr = self.root.unwrap();
- 
-        loop {
-            path.push(curr);
-            let cmp = {
-                let b1_base = base;
-                let b1_lo = offset;
-                let b1_hi = offset + 1;
-                let b2_base = self.nodes[curr].base_id;
-                let b2_lo = self.nodes[curr].offset;
-                let b2_hi = b2_lo + self.nodes[curr].size as u32;
-                id_arena.compare_intervals(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
-            };
-
-            match cmp {
-                IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
-                    let from_node = &mut self.nodes[curr];
-                    if let Some(r) = from_node.right {
-                        curr = r;
-                    } else {
-                        break;
-                    } 
-                },
-                IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
-                    let from_node = &mut self.nodes[curr];
-                    if let Some(l) = from_node.left {
-                        curr = l;
-                    } else {
-                        break;    
-                    }
-                },
-                IdOrderingRelation::B1InsideB2 | IdOrderingRelation::B1EqualsB2 => {
-                    // Found the block, return the path to it 
-                    return path;
-                }
-                _ => panic!("Unexpected relation between B1 and B2 during find_by_id")
-            }
-        }
-        return Path::new();
-    }
-
     pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: &[u32], offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
@@ -785,18 +685,18 @@ impl Tree {
                 let b2_base = curr_node.base_id;
                 let b2_lo = curr_node.offset;
                 let b2_hi = b2_lo + curr_node.size as u32;
-                id_arena.compare_intervals_first_raw(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
+                id_arena.compare_intervals(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
             };
 
             match cmp {
-                IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
+                IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 | IdOrderingRelation::B1AfterB2E => {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
                     } else {
                         return Path::new();
                     }
                 }
-                IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
+                IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 | IdOrderingRelation::B1BeforeB2E => {
                     if let Some(l) = self.nodes[curr].left {
                         curr = l;
                     } else {

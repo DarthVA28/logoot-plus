@@ -7,6 +7,7 @@ pub const MIN_VALUE: u32 = 0;
 pub const MAX_VALUE: u32 = 100000;
 pub const MAX_AGENTS: u32 = 1000;
 pub type Range = (u32, u32);
+pub const ID_SIZE: usize = 3;
 
 const EMPTY_OFFSET: u32 = u32::MAX;
 
@@ -51,34 +52,10 @@ pub enum IdOrderingRelation {
     B1AfterB2E,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BaseRelation {
-    Diverged(Ordering),
-    Equal,
-    B1Prefix { discriminant: u32 },
-    B2Prefix { discriminant: u32 },
-}
-
-impl BaseRelation {
-    #[inline(always)]
-    fn compare(self, b1_extra: u32, b2_extra: u32) -> Ordering {
-        match self {
-            BaseRelation::Diverged(ord) => ord,
-            BaseRelation::Equal => b1_extra.cmp(&b2_extra),
-            BaseRelation::B1Prefix { discriminant } => {
-                match b1_extra.cmp(&discriminant) {
-                    Ordering::Equal => Ordering::Less,
-                    ord => ord,
-                }
-            }
-            BaseRelation::B2Prefix { discriminant } => {
-                match discriminant.cmp(&b2_extra) {
-                    Ordering::Equal => Ordering::Greater,
-                    ord => ord,
-                }
-            }
-        }
-    }
+pub enum RunComparision {
+    SameBase,
+    Adjacent,
+    Different
 }
 
 #[derive(Clone, Debug)]
@@ -127,45 +104,54 @@ impl IdArena {
         }
     }
 
-    #[inline]
-    fn base_relation(&self, b1: Identifier, b2: Identifier) -> BaseRelation {
-        if b1.offset == b2.offset {
-            return BaseRelation::Equal;
+    #[inline(always)]
+    pub fn compare_ids_raw(&self, x: &[u32], x_offset: u32, y: &[u32], y_offset: u32) -> Ordering {
+        let x_tuples = x.len() / ID_SIZE;
+        let y_tuples = y.len() / ID_SIZE;
+        let min_tuples = x_tuples.min(y_tuples);
+
+        for t in 0..min_tuples {
+            let i = t * ID_SIZE;            
+            let x1 = unsafe {x.get_unchecked(i)} + if t == x_tuples - 1 { x_offset } else { 0 };
+            let y1 = unsafe{y.get_unchecked(i)} + if t == y_tuples - 1 { y_offset } else { 0 };
+            let x2 = unsafe {x.get_unchecked(i + 1)};
+            let y2 = unsafe {y.get_unchecked(i + 1)};
+
+            let lhs = x1 as u64 * (*y2 as u64);
+            let rhs = y1 as u64 * (*x2 as u64);
+
+            match lhs.cmp(&rhs) {
+                Ordering::Equal => {
+                    let x_extra = unsafe {x.get_unchecked(i + 2)};
+                    let y_extra = unsafe {y.get_unchecked(i + 2)};
+                    match x_extra.cmp(&y_extra) {
+                        Ordering::Equal => continue,
+                        cmp => return cmp,
+                    }
+                }
+                cmp => return cmp,
+            }
         }
 
-        let sa = self.get_slice_unchecked(b1);
-        let sb = self.get_slice_unchecked(b2);
-        self.base_relation_raw(sa, sb)
+        x_tuples.cmp(&y_tuples)
     }
 
-    fn base_relation_raw(&self, sa: &[u32], sb: &[u32]) -> BaseRelation {
-        let sa_len = sa.len();
-        let sb_len = sb.len();
-        let min_len = sa_len.min(sb_len);
-
-        let sa_prefix = unsafe { sa.get_unchecked(..min_len) };
-        let sb_prefix = unsafe { sb.get_unchecked(..min_len) };
-
-        match sa_prefix.cmp(sb_prefix) {
-            Ordering::Equal => {}
-            ord => return BaseRelation::Diverged(ord),
+    fn compare_runs(sa: &[u32], a_off: u32, sb: &[u32], b_off: u32) -> RunComparision {
+        if sa.len() != sb.len() { return RunComparision::Different; }
+        let d = sa.len() - ID_SIZE; // index of deepest tuple
+        // All elements must match except the numerator at index d.
+        for i in 0..sa.len() {
+            if i == d { continue; }
+            if sa[i] != sb[i] { return RunComparision::Different; }
         }
-
-        match sa_len.cmp(&sb_len) {
-            Ordering::Equal => BaseRelation::Equal,
-            Ordering::Less => BaseRelation::B1Prefix {
-                discriminant: unsafe { *sb.get_unchecked(min_len) },
-            },
-            Ordering::Greater => BaseRelation::B2Prefix {
-                discriminant: unsafe { *sa.get_unchecked(min_len) },
-            },
+        // The effective numerators must be equal 
+        if sa[d].wrapping_add(a_off) == sb[d].wrapping_add(b_off) {
+            RunComparision::Adjacent
+        } else if sa[d] == sb[d] {
+            RunComparision::SameBase
+        } else {
+            RunComparision::Different
         }
-    }
-
-    #[inline]
-    pub fn compare_ids(&self, a: Identifier, b: Identifier) -> Ordering {
-        if a.offset == b.offset { return Ordering::Equal; }
-        self.get_slice_unchecked(a).cmp(self.get_slice_unchecked(b))
     }
 
     /// Compare two (base, extra) pairs. Replaces the old compare_refs(IdentifierRef, IdentifierRef).
@@ -174,212 +160,132 @@ impl IdArena {
         if a_base.offset == b_base.offset {
             return a_extra.cmp(&b_extra);
         }
-        self.base_relation(a_base, b_base).compare(a_extra, b_extra)
-    }
-
-    /// Compare two intervals given as (base, lo, hi). This is the only interval
-    /// comparison function — the old wrapper taking IdentifierInterval is removed.
-    pub fn compare_intervals(
-        &self,
-        b1_base: Identifier, b1_lo: u32, b1_hi: u32,
-        b2_base: Identifier, b2_lo: u32, b2_hi: u32,
-    ) -> IdOrderingRelation {
-        // Fast path: same base → pure offset arithmetic
-        if b1_base == b2_base {
-            if b1_lo == b2_lo && b1_hi == b2_hi {
-                return IdOrderingRelation::B1EqualsB2;
-            } else if b1_hi == b2_lo {
-                return IdOrderingRelation::B1ConcatB2;
-            } else if b2_hi == b1_lo {
-                return IdOrderingRelation::B2ConcatB1;
-            } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
-                return IdOrderingRelation::B1InsideB2;
-            } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
-                return IdOrderingRelation::B2InsideB1;
-            } else if b1_lo < b2_lo {
-                return IdOrderingRelation::B1BeforeB2;
-            } else {
-                return IdOrderingRelation::B1AfterB2;
-            }
-        }
-
-        let rel = self.base_relation(b1_base, b2_base);
-
-        if rel == BaseRelation::Equal {
-            if b1_lo == b2_lo && b1_hi == b2_hi {
-                return IdOrderingRelation::B1EqualsB2;
-            } else if b1_hi == b2_lo {
-                return IdOrderingRelation::B1ConcatB2;
-            } else if b2_hi == b1_lo {
-                return IdOrderingRelation::B2ConcatB1;
-            } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
-                return IdOrderingRelation::B1InsideB2;
-            } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
-                return IdOrderingRelation::B2InsideB1;
-            } else if b1_lo < b2_lo {
-                return IdOrderingRelation::B1BeforeB2;
-            } else {
-                return IdOrderingRelation::B1AfterB2;
-            }
-        }
-
-        match rel.compare(b1_lo, b2_lo) {
-            Ordering::Less => {
-                if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
-                    IdOrderingRelation::B2InsideB1
-                } else {
-                    // Check if bases equal 
-                    if rel == BaseRelation::Equal {
-                        IdOrderingRelation::B1BeforeB2E
-                    } else {
-                        IdOrderingRelation::B1BeforeB2
-                    }
-                }
-            }
-            Ordering::Greater => {
-                if rel.compare(b1_lo, b2_hi - 1) == Ordering::Less {
-                    IdOrderingRelation::B1InsideB2
-                } else {
-                    // Check if bases equal
-                    if rel == BaseRelation::Equal {
-                        IdOrderingRelation::B1AfterB2E
-                    } else {
-                        IdOrderingRelation::B1AfterB2
-                    }
-                }
-            }
-            Ordering::Equal => {
-                if rel.compare(b1_hi-1, b2_hi-1) == Ordering::Equal {
-                    return IdOrderingRelation::B1EqualsB2;
-                }
-                // Random, check!
-                IdOrderingRelation::B1BeforeB2
-            }
-        }
+        self.compare_ids_raw(self.get_slice_unchecked(a_base), a_extra, self.get_slice_unchecked(b_base), b_extra)
     }
     
-
     // Function to compare against a raw identifier slice without interning 
-    pub fn compare_intervals_first_raw(&self, 
+    pub fn compare_intervals(&self, 
         b1_base: &[u32], b1_lo: u32, b1_hi: u32,
         b2_base: Identifier, b2_lo: u32, b2_hi: u32)
         -> IdOrderingRelation
     {
-        let rel = self.base_relation_raw(b1_base, self.get_slice_unchecked(b2_base));
+        let b2_base_slice = self.get_slice_unchecked(b2_base);
+        let lo_cmp = self.compare_ids_raw(b1_base, b1_lo, b2_base_slice, b2_lo);
 
-        if rel == BaseRelation::Equal {
-            if b1_lo == b2_lo && b1_hi == b2_hi {
-                return IdOrderingRelation::B1EqualsB2;
-            } else if b1_hi == b2_lo {
-                return IdOrderingRelation::B1ConcatB2;
-            } else if b2_hi == b1_lo {
-                return IdOrderingRelation::B2ConcatB1;
-            } else if b1_lo >= b2_lo && b1_hi <= b2_hi {
-                return IdOrderingRelation::B1InsideB2;
-            } else if b2_lo >= b1_lo && b2_hi <= b1_hi {
-                return IdOrderingRelation::B2InsideB1;
-            } else if b1_lo < b2_lo {
-                return IdOrderingRelation::B1BeforeB2;
-            } else {
-                return IdOrderingRelation::B1AfterB2;
-            }
-        }
-
-        match rel.compare(b1_lo, b2_lo) {
+        match lo_cmp {
             Ordering::Less => {
-                if rel.compare(b1_hi - 1, b2_lo) == Ordering::Greater {
-                    IdOrderingRelation::B2InsideB1
-                } else {
-                    // Check if bases equal 
-                    if rel == BaseRelation::Equal {
-                        IdOrderingRelation::B1BeforeB2E
-                    } else {
-                        IdOrderingRelation::B1BeforeB2
+                let hi_lo_cmp = self.compare_ids_raw(b1_base, b1_hi-1, b2_base_slice, b2_lo);
+                match hi_lo_cmp {
+                    Ordering::Less => {
+                        // Check for run successorship 
+                        match Self::compare_runs(b1_base, b1_hi, b2_base_slice, b2_lo) {
+                            RunComparision::Adjacent => IdOrderingRelation::B1ConcatB2,
+                            RunComparision::Different => IdOrderingRelation::B1BeforeB2,
+                            RunComparision::SameBase => IdOrderingRelation::B1BeforeB2E,
+                        }
                     }
+                    _ => IdOrderingRelation::B2InsideB1
                 }
-            }
+            } 
             Ordering::Greater => {
-                if rel.compare(b1_lo, b2_hi - 1) == Ordering::Less {
-                    IdOrderingRelation::B1InsideB2
-                } else {
-                    // Check if bases equal
-                    if rel == BaseRelation::Equal {
-                        IdOrderingRelation::B1AfterB2E
-                    } else {
-                        IdOrderingRelation::B1AfterB2
+                let lo_hi_cmo = self.compare_ids_raw(b1_base, b1_lo, b2_base_slice, b2_hi-1);
+                match lo_hi_cmo {
+                    Ordering::Greater => {
+                        match Self::compare_runs(b2_base_slice, b2_hi, b1_base, b1_lo) {
+                            RunComparision::Adjacent => IdOrderingRelation::B2ConcatB1,
+                            RunComparision::Different => IdOrderingRelation::B1AfterB2,
+                            RunComparision::SameBase => IdOrderingRelation::B1AfterB2E,
+                        }
                     }
+                    _ => IdOrderingRelation::B1InsideB2
                 }
             }
             Ordering::Equal => {
-                // if rel.compare(b1_hi-1, b2_hi-1) == Ordering::Equal {
-                //     return IdOrderingRelation::B1EqualsB2;
-                // }
-                // Random, check!
-                IdOrderingRelation::B1BeforeB2
+                // Same start, whoever has the longer range contains the other 
+                match b1_hi.cmp(&b2_hi) {
+                    Ordering::Less => IdOrderingRelation::B1InsideB2,
+                    Ordering::Greater => IdOrderingRelation::B2InsideB1,
+                    Ordering::Equal => IdOrderingRelation::B1EqualsB2,
+                }
             }
-
         }
     } 
 
-    /// How many characters from `insert` can be placed before `next`.
-    /// Replaces the old num_insertable(IdentifierRef, IdentifierRef, u32).
+    /// Count how many k ∈ {0, …, length−1} make (ins, ins_extra+k) < (nxt, nxt_extra).
+    /// nxt_extra is applied to nxt's deepest numerator only when depths match.
+    fn count_before(
+        ins: &[u32], ins_extra: u32,
+        nxt: &[u32], nxt_extra: u32,
+        length: u32,
+    ) -> u32 {
+        let ins_depth = ins.len() / ID_SIZE;
+        let nxt_depth = nxt.len() / ID_SIZE;
+ 
+        if ins_depth > nxt_depth { return length; }
+ 
+        // Compare prefix tuples (before insert's deepest).
+        for t in 0..(ins_depth - 1) {
+            let i = t * ID_SIZE;
+            let lhs = ins[i] as u64 * nxt[i + 1] as u64;
+            let rhs = nxt[i] as u64 * ins[i + 1] as u64;
+            if lhs != rhs { return if lhs < rhs { length } else { 0 }; }
+            if ins[i + 2] != nxt[i + 2] { return if ins[i + 2] < nxt[i + 2] { length } else { 0 }; }
+        }
+ 
+        // At insert's deepest tuple.
+        let d = (ins_depth - 1) * ID_SIZE;
+        let ins_num = ins[d] as u64 + ins_extra as u64;
+        let nxt_num = nxt[d] as u64 + if ins_depth == nxt_depth { nxt_extra as u64 } else { 0 };
+ 
+        let lhs = nxt_num * ins[d + 1] as u64; // nxt × ins_den
+        let rhs = ins_num * nxt[d + 1] as u64; // ins × nxt_den
+        if lhs < rhs { return 0; }
+ 
+        let gap = lhs - rhs;
+        let b_nxt = nxt[d + 1] as u64;
+        let q = gap / b_nxt;
+        let r = gap % b_nxt;
+ 
+        let mut k = q + 1;
+        if r == 0 {
+            // Rationals exactly equal at offset q — tiebreak on agent_info then depth.
+            if ins[d + 2] > nxt[d + 2]
+                || (ins[d + 2] == nxt[d + 2] && ins_depth >= nxt_depth)
+            {
+                k = q;
+            }
+        }
+ 
+        length.min(k as u32)
+    }
+ 
+    /// How many characters from the run at `insert` can be placed before `next`.
     pub fn num_insertable(
         &self,
         insert_base: Identifier, insert_extra: u32,
         next_base: Identifier, next_extra: u32,
         length: u32,
     ) -> u32 {
-        let insert_slice = self.get_slice_unchecked(insert_base);
-        let next_slice = self.get_slice_unchecked(next_base);
-
-        let l = insert_slice.len();
-
-        if l >= next_slice.len() + 1 { return length; }
-
-        let next_full_iter = next_slice.iter().chain(std::iter::once(&next_extra));
-        for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
-            if a != b { return length; }
+        if insert_base == next_base {
+            if insert_extra >= next_extra { return 0; }
+            return length.min(next_extra - insert_extra);
         }
-
-        let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
-        next_at_l + 1 - insert_extra
+        Self::count_before(
+            self.get_slice_unchecked(insert_base), insert_extra,
+            self.get_slice_unchecked(next_base), next_extra,
+            length,
+        )
     }
-
-    /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
+ 
+    /// Find where to split the interval (short_slice, short_lo..short_hi)
+    /// when the point long_slice falls inside it.
     pub fn find_split_point(
         &self,
         short_slice: &[u32], short_lo: u32, short_hi: u32,
         long_slice: &[u32],
     ) -> u32 {
-        if long_slice.is_empty() { return 0; }
-
-        let text_len = short_hi - short_lo;
-        if text_len == 0 { return 0; }
-
-        // let long_slice = self.get_slice_unchecked(id_long);
-        // let short_slice = self.get_slice_unchecked(short_base);
-
-        let min_len = short_slice.len().min(long_slice.len());
-
-        let short_prefix = unsafe { short_slice.get_unchecked(..min_len) };
-        let long_prefix = unsafe { long_slice.get_unchecked(..min_len) };
-        match short_prefix.cmp(long_prefix) {
-            Ordering::Less  => return text_len,
-            Ordering::Greater => return 0,
-            Ordering::Equal => {}
-        }
-
-        if short_slice.len() < long_slice.len() {
-            let pivot = unsafe { *long_slice.get_unchecked(min_len) };
-            let extras_below = if long_slice.len() > min_len + 1 {
-                pivot.saturating_add(1).saturating_sub(short_lo)
-            } else {
-                pivot.saturating_sub(short_lo)
-            };
-            return extras_below.min(text_len);
-        } else {
-            return 0;
-        }
+        if short_hi <= short_lo || long_slice.is_empty() { return 0; }
+        Self::count_before(short_slice, short_lo, long_slice, 0, short_hi - short_lo)
     }
 
     #[inline(always)]
@@ -406,29 +312,95 @@ impl IdArena {
 
 pub fn generate_base(
     arena: &mut IdArena,
-    low_base: Identifier, low_extra: u32,
-    high_base: Identifier, high_extra: u32,
+    low_base: Identifier, low_offset: u32,
+    high_base: Identifier, high_offset: u32,
     state: &mut State,
+    count: u32,
 ) -> Identifier {
-    let low_slice = arena.get_slice(low_base);
-    let high_slice = arena.get_slice(high_base);
-
-    let mut new_path: Vec<u32> = Vec::new();
-    let mut low_iter = low_slice.iter().copied().chain(std::iter::once(low_extra));
-    let mut high_iter = high_slice.iter().copied().chain(std::iter::once(high_extra));
-
-    let mut l = low_iter.next().unwrap_or(MIN_VALUE);
-    let mut h = high_iter.next().unwrap_or(MAX_VALUE);
-
-    while (h as i32) - (l as i32) < 2 {
-        new_path.push(l);
-        l = low_iter.next().unwrap_or(MIN_VALUE);
-        h = high_iter.next().unwrap_or(MAX_VALUE);
+    // Materialise the effective low/high identifiers.
+    let low_s: Vec<u32> = if low_base.is_empty() {
+        vec![]
+    } else {
+        let s = arena.get_slice(low_base);
+        let mut v = s.to_vec();
+        let d = v.len() - ID_SIZE;
+        v[d] += low_offset;
+        v
+    };
+    let high_s: Vec<u32> = if high_base.is_empty() {
+        vec![]
+    } else {
+        let s = arena.get_slice(high_base);
+        let mut v = s.to_vec();
+        let d = v.len() - ID_SIZE;
+        v[d] += high_offset;
+        v
+    };
+ 
+    let max_tuples = low_s.len().max(high_s.len()) / ID_SIZE + 2;
+    let mut path: Vec<u32> = Vec::with_capacity(max_tuples * ID_SIZE);
+ 
+    let agent_info = state.replica + state.local_clock * MAX_AGENTS;
+ 
+    for t in 0..max_tuples {
+        let i = t * ID_SIZE;
+ 
+        // Low bound at this depth (default: 0/1 = 0)
+        let (al, bl) = if i + 1 < low_s.len() {
+            (low_s[i], low_s[i + 1])
+        } else {
+            (0u32, 1u32)
+        };
+ 
+        // High bound at this depth (default: MAX_VALUE/1)
+        let (ah, bh) = if i + 1 < high_s.len() {
+            (high_s[i], high_s[i + 1])
+        } else {
+            (MAX_VALUE, 1u32)
+        };
+ 
+        let cross_l = al as u64 * bh as u64;
+        let cross_h = ah as u64 * bl as u64;
+ 
+        if cross_l < cross_h {
+            // There is room between al/bl and ah/bh.
+            let (al, bl, ah, bh) = (al as u64, bl as u64, ah as u64, bh as u64);
+            let cnt = count as u64;
+ 
+            // Smallest denominator bm such that `count` distinct integer
+            // numerators fit in the open interval (al/bl, ah/bh):
+            //   ⌊ah·bm/bh⌋ − ⌈al·bm/bl⌉ ≥ count
+            // Conservative: bm = cnt·bl·bh / gap + 1  (always sufficient).
+            let gap = ah * bl - al * bh;   // > 0
+            let bm = cnt * bl * bh / gap + 1;
+ 
+            // First valid numerator: smallest am with am/bm > al/bl
+            // i.e. am·bl > al·bm  ⟹  am ≥ ⌊al·bm/bl⌋ + 1
+            let am_min = al * bm / bl + 1;
+ 
+            // Largest valid numerator end: we need (am + cnt − 1)·bh < ah·bm
+            // i.e. am + cnt − 1 ≤ ⌊(ah·bm − 1) / bh⌋
+            let run_end_max = (ah * bm - 1) / bh; // largest x with x·bh < ah·bm
+            let am_max = run_end_max.saturating_sub(cnt - 1);
+ 
+            if am_min <= am_max && am_max <= u32::MAX as u64 && bm <= u32::MAX as u64 {
+                // Inject randomness: pick am uniformly in [am_min, am_max].
+                let am = if am_min == am_max {
+                    am_min
+                } else {
+                    state.rng.random_range(am_min..=am_max)
+                };
+ 
+                path.extend_from_slice(&[am as u32, bm as u32, agent_info]);
+                return arena.intern(&path);
+            }
+            // Overflow — fall through to go deeper.
+        }
+ 
+        // No room (or overflow) at this depth.  Copy low's tuple and descend.
+        let info = if i + 2 < low_s.len() { low_s[i + 2] } else { 0 };
+        path.extend_from_slice(&[al, bl, info]);
     }
-
-    let nxt = state.rng.random_range(l + 1..h);
-    new_path.push(nxt);
-    new_path.push(state.replica + state.local_clock * MAX_AGENTS);
-
-    arena.intern(&new_path)
+ 
+    unreachable!("could not allocate identifier between low and high")
 }

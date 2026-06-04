@@ -170,7 +170,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
         let n = doc.id_arena.num_insertable(insert_base, insert_offsets.1, next_base, next_offsets.0, text_len);
         if n < text_len {
             // Can't extend — not enough room before the next block.
-            let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state);
+            let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state, text_len);
             let node = Node::new(text.clone(), base, 0, site);
             doc.blocks.insert_after(path, node);
             return Operation {
@@ -196,12 +196,13 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
 fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
     let doc_size = doc.blocks.tree_size();
     let pos = if pos > doc_size { doc_size } else { pos };
+    let text_len = text.len() as u32;
  
     let (path, covered) = doc.blocks.find_by_pos(pos);
  
     // ── Empty tree ──────────────────────────────────────────────────────
     if path.is_empty() {
-        let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
+        let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state, text_len);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
         doc.blocks.insert_first(node);
         return Operation {
@@ -236,9 +237,9 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
             Some(next_block) => {
                 let next_base   = doc.blocks.node_base_id(next_block);
                 let next_ranges = doc.blocks.node_ranges(next_block);
-                generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, next_base, next_ranges.0, &mut doc.state)
+                generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, next_base, next_ranges.0, &mut doc.state, text_len)
             }
-            None => generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, Identifier::EMPTY, MAX_VALUE, &mut doc.state)
+            None => generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, Identifier::EMPTY, MAX_VALUE, &mut doc.state, text_len)
         };
         // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
@@ -261,9 +262,9 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
                 let prev_base   = doc.blocks.node_base_id(prev_block);
                 let prev_ranges = doc.blocks.node_ranges(prev_block);
                 // IdentifierRef::new(prev_base, prev_ranges.1 - 1)
-                generate_base(&mut doc.id_arena, prev_base, prev_ranges.1 - 1, block_base, block_ranges.0, &mut doc.state)
+                generate_base(&mut doc.id_arena, prev_base, prev_ranges.1 - 1, block_base, block_ranges.0, &mut doc.state, text_len)
             }
-            None => generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, block_base, block_ranges.0, &mut doc.state),
+            None => generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, block_base, block_ranges.0, &mut doc.state, text_len),
         };
         // let id_high = IdentifierRef::new(block_base, block_ranges.0);
         // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
@@ -290,7 +291,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         block_ranges.1 - block_ranges.0
     );
  
-    let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state);
+    let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state, text_len);
     let middle = Node::new(text.clone(), base, 0, doc.state.replica);
  
     doc.blocks.split_and_insert_middle(&path, sp as usize, middle);
