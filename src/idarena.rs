@@ -201,8 +201,8 @@ impl IdArena {
                 }
             }
             Ordering::Equal => {
-                // Same start, whoever has the longer range contains the other 
-                match b1_hi.cmp(&b2_hi) {
+                let hi_cmp = self.compare_ids_raw(b1_base, b1_hi-1, b2_base_slice, b2_hi-1);
+                match hi_cmp {
                     Ordering::Less => IdOrderingRelation::B1InsideB2,
                     Ordering::Greater => IdOrderingRelation::B2InsideB1,
                     Ordering::Equal => IdOrderingRelation::B1EqualsB2,
@@ -282,10 +282,10 @@ impl IdArena {
     pub fn find_split_point(
         &self,
         short_slice: &[u32], short_lo: u32, short_hi: u32,
-        long_slice: &[u32],
+        long_slice: &[u32], long_offset: u32
     ) -> u32 {
         if short_hi <= short_lo || long_slice.is_empty() { return 0; }
-        Self::count_before(short_slice, short_lo, long_slice, 0, short_hi - short_lo)
+        Self::count_before(short_slice, short_lo, long_slice, long_offset, short_hi - short_lo)
     }
 
     #[inline(always)]

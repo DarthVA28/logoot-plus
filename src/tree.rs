@@ -487,7 +487,7 @@ impl Tree {
                         let from_node = &self.nodes[from];
                         let f_offset = from_node.offset;
                         let from_slice = id_arena.get_slice_unchecked(from_node.base_id);
-                        let sp = id_arena.find_split_point(from_slice, f_offset, f_offset + from_node.size as u32, node_base);
+                        let sp = id_arena.find_split_point(from_slice, f_offset, f_offset + from_node.size as u32, node_base, node_lo);
                         // let sp = id_arena.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
                         let from_content_ref = &from_node.content;
@@ -542,6 +542,13 @@ impl Tree {
                                 continue;
                             } else {
                                 from_node.right = Some(node);
+                                if inserted_id == Identifier::EMPTY {
+                                    let base_id = id_arena.intern(node_base);
+                                    self.node_set_base_id(node, base_id);
+                                    inserted_id = base_id;
+                                } else {
+                                    self.node_set_base_id(node, inserted_id);
+                                }
                                 break;
                             }
                         }
@@ -553,6 +560,13 @@ impl Tree {
                             continue;
                         } else {
                             from_node.right = Some(node);
+                            if inserted_id == Identifier::EMPTY {
+                                let base_id = id_arena.intern(node_base);
+                                self.node_set_base_id(node, base_id);
+                                inserted_id = base_id;
+                            } else {
+                                self.node_set_base_id(node, inserted_id);
+                            }
                             break;
                         }
                     }
@@ -596,7 +610,8 @@ impl Tree {
                     let sp = {
                         let b2_base = self.nodes[from].base_id;
                         let b2_slice = id_arena.get_slice_unchecked(b2_base);
-                        id_arena.find_split_point(node_base, node_lo, node_hi, b2_slice)
+                        let b2_offset = self.nodes[from].offset;
+                        id_arena.find_split_point(node_base, node_lo, node_hi, b2_slice, b2_offset)
                     };
                     let content = std::mem::take(&mut self.nodes[node].content);
                     let byte_idx = content
