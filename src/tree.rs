@@ -500,23 +500,17 @@ impl Tree {
                     };
 
                     let rcontent = from_content.split_off(b_idx);
-
                     let right_node = Node::new(rcontent, from_base_id.clone(), from_offset + sp, from_creator);
-                    let right_idx = &self.alloca(right_node);
+                    let right_idx = self.alloca(right_node);
+
+                    // Detach original_right BEFORE mutating from
+                    let original_right = self.nodes[from].right;
 
                     let from_node = &mut self.nodes[from];
-                    let original_right = from_node.right;
                     from_node.content = from_content;
                     from_node.size = from_node.content.chars().count();
-                    from_node.right = Some(*right_idx);
 
-                    let right_node = &mut self.nodes[*right_idx];
-                    right_node.right = original_right;
-                    right_node.left = Some(node);
-
-                    path.push(*right_idx);
-
-                    // Intern the identifier for the new node
+                    // Intern identifier for the new node
                     if inserted_id == Identifier::EMPTY {
                         let base_id = id_arena.intern(node_base);
                         self.node_set_base_id(node, base_id);
@@ -524,6 +518,9 @@ impl Tree {
                     } else {
                         self.node_set_base_id(node, inserted_id);
                     }
+
+                    let joined = self.join(Some(node), right_idx, original_right);
+                    self.nodes[from].right = Some(joined);
 
                     con = false;
                 },
@@ -913,42 +910,60 @@ impl Tree {
         let left_content  = content[..byte_idx].to_string();
         let right_content = content[byte_idx..].to_string();
 
-        // ── 2. Update target to be the left half ────────────────────────
-        let left_size = sp;
+        // // ── 2. Update target to be the left half ────────────────────────
+        // let left_size = sp;
+        // self.nodes[target].content = left_content;
+        // self.nodes[target].size = left_size;
+        // // target keeps its base_id, offset, creator, and LEFT child.
+
+        // // ── 3. Allocate right half ──────────────────────────────────────
+        // let right_node = Node::new(
+        //     right_content,
+        //     base_id,
+        //     offset + sp as u32,
+        //     creator,
+        // );
+        // let right_idx = self.alloca(right_node);
+        // // Right half inherits target's original right subtree.
+        // self.nodes[right_idx].right = original_right;
+
+        // // ── 4. Allocate middle node ─────────────────────────────────────
+        // let middle_base   = middle.base_id;
+        // let middle_offset = middle.offset;
+        // let middle_size   = middle.size as u32;
+        // let middle_idx = self.alloca(middle);
+        // self.register_base_offsets(middle_base, middle_offset, middle_size);
+
+        // // ── 5. Wire up ─────────────────────────────────────────────────
+        // // middle is the left child of right_half (it comes between left and right
+        // // in in-order). target's right is now right_half.
+        // self.nodes[right_idx].left = Some(middle_idx);
+        // self.nodes[target].right   = Some(right_idx);
+
+        // // ── 6. Rebalance from the deepest new node up to root ───────────
+        // let mut extended_path: Path = Path::from_slice(path);
+        // extended_path.push(right_idx);
+        // extended_path.push(middle_idx);
+        // self.rebalance(&extended_path);
+
+        // middle_idx
         self.nodes[target].content = left_content;
-        self.nodes[target].size = left_size;
-        // target keeps its base_id, offset, creator, and LEFT child.
+        self.nodes[target].size = sp;
 
-        // ── 3. Allocate right half ──────────────────────────────────────
-        let right_node = Node::new(
-            right_content,
-            base_id,
-            offset + sp as u32,
-            creator,
-        );
+        let right_node = Node::new(right_content, base_id, offset + sp as u32, creator);
         let right_idx = self.alloca(right_node);
-        // Right half inherits target's original right subtree.
-        self.nodes[right_idx].right = original_right;
 
-        // ── 4. Allocate middle node ─────────────────────────────────────
         let middle_base   = middle.base_id;
         let middle_offset = middle.offset;
         let middle_size   = middle.size as u32;
         let middle_idx = self.alloca(middle);
         self.register_base_offsets(middle_base, middle_offset, middle_size);
 
-        // ── 5. Wire up ─────────────────────────────────────────────────
-        // middle is the left child of right_half (it comes between left and right
-        // in in-order). target's right is now right_half.
-        self.nodes[right_idx].left = Some(middle_idx);
-        self.nodes[target].right   = Some(right_idx);
+        // In-order: target(left half), middle_idx, right_idx, original_right...
+        let joined = self.join(Some(middle_idx), right_idx, original_right);
+        self.nodes[target].right = Some(joined);
 
-        // ── 6. Rebalance from the deepest new node up to root ───────────
-        let mut extended_path: Path = Path::from_slice(path);
-        extended_path.push(right_idx);
-        extended_path.push(middle_idx);
-        self.rebalance(&extended_path);
-
+        self.rebalance(path);  // path ends at target, NOT at right_idx
         middle_idx
     }
 
@@ -1028,23 +1043,37 @@ impl Tree {
         let left_content  = content[..left_byte].to_string();
         let right_content = content[mid_byte..].to_string();
 
+        // self.nodes[target].content = left_content;
+        // self.nodes[target].size = start;
+
+        // let right_node = Node::new(
+        //     right_content,
+        //     base_id,
+        //     offset + (start + count) as u32,
+        //     creator,
+        // );
+        // let right_idx = self.alloca(right_node);
+
+        // self.nodes[right_idx].right = original_right;
+        // self.nodes[target].right = Some(right_idx);
+
+        // let mut extended_path: Path = Path::from_slice(path);
+        // extended_path.push(right_idx);
+        // self.rebalance(&extended_path);
         self.nodes[target].content = left_content;
         self.nodes[target].size = start;
 
         let right_node = Node::new(
-            right_content,
-            base_id,
-            offset + (start + count) as u32,
-            creator,
+            right_content, base_id, offset + (start + count) as u32, creator,
         );
         let right_idx = self.alloca(right_node);
 
-        self.nodes[right_idx].right = original_right;
-        self.nodes[target].right = Some(right_idx);
+        // In-order: target(left half), right_idx, original_right...
+        // No middle element here — right_idx is the separator
+        let joined = self.join(None, right_idx, original_right);
+        self.nodes[target].right = Some(joined);
 
-        let mut extended_path: Path = Path::from_slice(path);
-        extended_path.push(right_idx);
-        self.rebalance(&extended_path);
+        self.rebalance(path);
     }
 
     pub fn insert_first(&mut self, node: Node) -> usize {
@@ -1188,5 +1217,72 @@ impl Tree {
             prev_offsets = Some((lo, hi));
         }
         true
+    }
+
+    pub fn check_avl(&self) -> bool {
+        fn check_avl_rec(tree: &Tree, idx: usize) -> Result<usize, String> {
+            let node = &tree.nodes[idx];
+            let left_height = if let Some(l) = node.left {
+                check_avl_rec(tree, l)?
+            } else {
+                0
+            };
+            let right_height = if let Some(r) = node.right {
+                check_avl_rec(tree, r)?
+            } else {
+                0
+            };
+            if (left_height as isize - right_height as isize).abs() > 1 {
+                return Err(format!("AVL violation at node {}: left height {}, right height {}", idx, left_height, right_height));
+            }
+            Ok(1 + std::cmp::max(left_height, right_height))
+        }
+
+        if let Some(root) = self.root {
+            match check_avl_rec(self, root) {
+                Ok(_) => true,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    false
+                }
+            }
+        } else {
+            true
+        }
+    }
+}
+
+impl Tree {
+    /// AVL join: merge left subtree `l`, separator node `mid`, and right subtree `r`
+    /// into a single balanced AVL tree.
+    /// Precondition: all keys in l < mid.key < all keys in r.
+    /// O(|height(l) - height(r)|).
+    pub fn join(&mut self, l: Option<usize>, mid: usize, r: Option<usize>) -> usize {
+        let lh = self.node_height(l);
+        let rh = self.node_height(r);
+
+        if (lh - rh).abs() <= 1 {
+            // Heights are close — mid becomes the root directly
+            self.nodes[mid].left = l;
+            self.nodes[mid].right = r;
+            self.update_node(mid);
+            return mid;
+        }
+
+        if lh > rh + 1 {
+            // Left tree is taller: walk down its right spine
+            let li = l.unwrap();
+            let lr = self.nodes[li].right;
+            let new_right = self.join(lr, mid, r);
+            self.nodes[li].right = Some(new_right);
+            self.avl_fix(li)
+        } else {
+            // Right tree is taller: walk down its left spine
+            let ri = r.unwrap();
+            let rl = self.nodes[ri].left;
+            let new_left = self.join(l, mid, rl);
+            self.nodes[ri].left = Some(new_left);
+            self.avl_fix(ri)
+        }
     }
 }
