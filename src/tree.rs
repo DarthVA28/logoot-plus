@@ -1043,23 +1043,6 @@ impl Tree {
         let left_content  = content[..left_byte].to_string();
         let right_content = content[mid_byte..].to_string();
 
-        // self.nodes[target].content = left_content;
-        // self.nodes[target].size = start;
-
-        // let right_node = Node::new(
-        //     right_content,
-        //     base_id,
-        //     offset + (start + count) as u32,
-        //     creator,
-        // );
-        // let right_idx = self.alloca(right_node);
-
-        // self.nodes[right_idx].right = original_right;
-        // self.nodes[target].right = Some(right_idx);
-
-        // let mut extended_path: Path = Path::from_slice(path);
-        // extended_path.push(right_idx);
-        // self.rebalance(&extended_path);
         self.nodes[target].content = left_content;
         self.nodes[target].size = start;
 
@@ -1242,7 +1225,7 @@ impl Tree {
             match check_avl_rec(self, root) {
                 Ok(_) => true,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    println!("{}", e);
                     false
                 }
             }
