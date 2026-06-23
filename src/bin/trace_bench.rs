@@ -458,6 +458,12 @@ where
 
     let started = Instant::now();
 
+    // Run 100 iterations to warm up 
+    println!("[{label}][target={target}] warming up with 100 iterations...");
+    for _i in 0..100 {
+        let _ = run_iteration()?;
+    } 
+
     for i in 0..iterations {
         let result = run_iteration()?;
 

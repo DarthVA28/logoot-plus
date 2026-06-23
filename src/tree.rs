@@ -1,8 +1,10 @@
 use core::panic;
+use std::cmp::Ordering;
 // use std::collections::HashMap;
 use ahash::AHashMap as HashMap;
 use crate::node::Node;
-use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
+// use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
+use crate::idarena::{Identifier, IdOrderingRelation, IdArena};
 use smallvec::SmallVec;
 
 pub type Path = SmallVec<[usize; 32]>;
@@ -61,10 +63,12 @@ impl Tree {
         self.free_list.push(idx);
     }
 
+    #[inline(always)]
     fn node_height(&self, node: Option<usize>) -> i32 { 
         node.map_or(0, |index| self.nodes[index].height)
     }
 
+    #[inline(always)]
     fn node_subtree_count(&self, node: Option<usize>) -> usize { 
         node.map_or(0, |index| self.nodes[index].subtree_count)
     }
@@ -73,10 +77,12 @@ impl Tree {
         node.map_or("", |index| &self.nodes[index].content)
     }
 
+    #[inline(always)]
     pub fn node_size(&self, node: Option<usize>) -> usize { 
         node.map_or(0, |index| self.nodes[index].size)
     }
 
+    #[inline(always)]
     pub fn node_left_count(&self, node: Option<usize>) -> usize { 
         if node.is_none() { return 0; }
         let left= self.nodes[node.unwrap()].left;
@@ -87,8 +93,8 @@ impl Tree {
         self.nodes[node].creator
     }
 
-    pub fn node_base_id(&self, node: usize) -> &Identifier { 
-        &self.nodes[node].base_id
+    pub fn node_base_id(&self, node: usize) -> Identifier { 
+        self.nodes[node].base_id
     }
 
     pub fn node_ranges(&self, node: usize) -> (u32, u32) { 
@@ -100,7 +106,7 @@ impl Tree {
 
     pub fn node_base_offsets(&self, node: usize) -> (u32, u32) { 
         // Get the offsets from the map
-        let base_id = self.nodes[node].base_id.clone();
+        let base_id = self.nodes[node].base_id;
         if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             return (*lo, *hi)
         } else {
@@ -108,14 +114,12 @@ impl Tree {
         }
     }
 
-    pub fn node_get_identifier_interval(&self, node: usize) -> IdentifierInterval { 
-        let base = self.nodes[node].base_id.clone();
-        let offset = self.nodes[node].offset;
-        IdentifierInterval::new(base, offset, offset + self.nodes[node].size as u32)
+    pub fn base_id_max_offset(&self, id: Identifier) -> Option<u32> {
+        self.base_to_offsets.get(&id).map(|(_, hi)| *hi)
     }
 
-    pub fn base_id_max_offset(&self, id: &Identifier) -> Option<u32> {
-        self.base_to_offsets.get(id).map(|(_, hi)| *hi)
+    pub fn node_set_base_id(&mut self, node: usize, new_base: Identifier) {
+        self.nodes[node].base_id = new_base;
     }
 
     pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
@@ -124,7 +128,7 @@ impl Tree {
         let added_size = text.chars().count();
         node.size += added_size;
         // update the offsets of the base 
-        let base_id = node.base_id.clone();
+        let base_id = node.base_id;
         if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = hi + added_size as u32;
             self.base_to_offsets.insert(base_id, (*lo, new_hi));
@@ -135,32 +139,37 @@ impl Tree {
     }
 
     pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
-        let node = &mut self.nodes[node];
-        let content_len = node.content.chars().count();
+        let n = &mut self.nodes[node];
         match location {
             DelLocation::Start => {
-                let new_content: String = node.content.chars().skip(num_delete as usize).collect();
-                node.content = new_content;
+                let byte_off = n.content.char_indices()
+                    .nth(num_delete)
+                    .map(|(i, _)| i)
+                    .unwrap_or(n.content.len());
+                let kept = n.content.split_off(byte_off);
+                n.content = kept;
+                n.offset += num_delete as u32;
             }
             DelLocation::End => {
-                let new_content: String = node.content.chars().take(content_len - num_delete).collect();
-                node.content = new_content;
+                let keep_chars = n.size - num_delete;
+                let byte_off = n.content.char_indices()
+                    .nth(keep_chars)
+                    .map(|(i, _)| i)
+                    .unwrap_or(n.content.len());
+                n.content.truncate(byte_off); // truncate in-place, no allocation
             }
         }
-        node.size -= num_delete as usize;
-        // update offsets 
-        node.offset = match location {
-            DelLocation::Start => node.offset + num_delete as u32,
-            DelLocation::End => node.offset
-        };
+        n.size -= num_delete;
         for idx in path_to_root.iter().rev() {
             self.update_node(*idx);
         }
     }
+
 }
 
 /* Rotation and Rebalancing Functions */
 impl Tree {
+    #[inline(always)]
     fn update_node(&mut self, idx: usize) {
         let left = self.nodes[idx].left;
         let right = self.nodes[idx].right;
@@ -245,7 +254,22 @@ impl Tree {
                     self.nodes[idx].right = Some(curr);
                 }
             }
+
+            let old_h = self.nodes[idx].height;
             curr = self.avl_fix(idx);
+            if curr == idx && self.nodes[idx].height == old_h {
+                for j in (0..i).rev() {
+                    self.update_node(path_to_root[j]);
+                }
+                if i > 0 { 
+                    self.root = Some(path_to_root[0]); 
+                }
+                else { 
+                    self.root = Some(curr); 
+                }
+            return;
+        }
+
         }
         self.root = Some(curr);
     }
@@ -364,79 +388,71 @@ impl Tree {
     }
 
     /// Insert the node by identifier  
-    pub fn insert_by_id(&mut self, site: u32, base: Id, offset: u32, content: String) {
-        let idx = self.alloca(Node::new(content.clone(), base.clone(), offset, site));
+    /// Return the interned identifier
+    pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, base: &[u32], offset: u32, content: String) -> Identifier {
         let len = content.chars().count() as u32;
+        let idx = self.alloca(Node::new(content, Identifier::EMPTY, offset, site));
         if self.is_empty() {
+            let base_id = id_arena.intern(base);
+            self.node_set_base_id(idx, base_id);
             self.root = Some(idx);
-            if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
-                // Modify the offsets accordingly
-                let new_hi = std::cmp::max(*hi, offset + len);
-                self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
-            } else {
-                self.base_to_offsets.insert(base.clone(), (offset, offset + len));
-            }
-            // self.base_to_offsets.insert(base.clone(), (offset, offset + content.chars().count() as u32));
-            return;
+            self.base_to_offsets.insert(base_id, (offset, offset + len));
+            return base_id;
         }
         let from = self.root.unwrap();
-        let len = content.chars().count() as u32;
-        let insert_interval = IdentifierInterval::new(base.clone(), offset, offset + len);
-        self.insert_rec(idx, insert_interval, from, content, site);
-        // Lookup in base to offsets map and modify the offsets accordingly
-        if let Some((lo, hi)) = self.base_to_offsets.get(&base.clone()) {
-            // Modify the offsets accordingly
+        let base_id = self.insert_rec(id_arena, idx, base, offset, offset + len, from, len, site);
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = std::cmp::max(*hi, offset + len);
-            self.base_to_offsets.insert(base.clone(), (*lo, new_hi));
+            self.base_to_offsets.insert(base_id.clone(), (*lo, new_hi));
         } else {
-            self.base_to_offsets.insert(base.clone(), (offset, offset + len));
+            self.base_to_offsets.insert(base_id.clone(), (offset, offset + len));
         }
+        base_id
     }
 
-    fn find_split_point(idi_short: &IdentifierInterval, id_long: &Id) -> u32 {
-        let mut sp = 0;
-        let text_len = idi_short.hi - idi_short.lo;
-        let id_long_slice = id_long.id.as_ref();
-        for i in 0..text_len {
-            let id_elem = IdentifierRef { base: idi_short.base.id.as_ref(), extra: idi_short.lo + i };
-            if id_elem.cmp_slice(id_long_slice) != std::cmp::Ordering::Less {
-                break;
-            }
-            sp += 1;
-        }
-        sp
-    }
-
-    pub fn insert_rec(&mut self, node: usize, mut node_idi: IdentifierInterval, mut from: usize, content: String, site: u32) {
+    pub fn insert_rec(&mut self, id_arena: &mut IdArena, node: usize, node_base: &[u32], node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) -> Identifier {
         let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
+        let mut inserted_id = Identifier::EMPTY;
 
         while con {
             path.push(from);
-            
-            // B1 is the block we are adding 
-            // B2 is the block we are comparing with
-            // let b1 = &mut node_idi;
-            // let b2 = &self.node_get_identifier_interval(from);
 
             let relation = {
                 let n = &self.nodes[from];
-                compare_intervals_raw(
-                    &node_idi.base, node_idi.lo, node_idi.hi,
-                    &n.base_id, n.offset, n.offset + n.size as u32,
-                )
-            }; // shared borrow of self.nodes[from] released here
+                id_arena.compare_intervals_first_raw(node_base, node_lo, node_hi, n.base_id, n.offset, n.offset + n.size as u32)
+            };
 
             match relation {
+                IdOrderingRelation::B1AfterB2E => {
+                    let from_node = &mut self.nodes[from];
+                    inserted_id = from_node.base_id;
+                    if let Some(r) = from_node.right {
+                        from = r;
+                        continue;
+                    } else {
+                        from_node.right = Some(node);
+                        self.node_set_base_id(node, inserted_id);
+                        con = false;
+                    }
+                }
                 IdOrderingRelation::B1AfterB2 => {
                     let from_node = &mut self.nodes[from];
                     if let Some(r) = from_node.right {
                         from = r;
                     } else {
                         from_node.right = Some(node);
+                        // Intern the identifier if not already done 
+                        if inserted_id == Identifier::EMPTY {
+                            let base_id = id_arena.intern(node_base);
+                            self.node_set_base_id(node, base_id);
+                            inserted_id = base_id;
+                        } else {
+                            self.node_set_base_id(node, inserted_id);
+                        }
                         con = false;
-                    } 
+                    }
                 },
                 IdOrderingRelation::B1BeforeB2 => {
                     let from_node = &mut self.nodes[from];
@@ -444,54 +460,79 @@ impl Tree {
                         from = l;
                     } else {
                         from_node.left = Some(node);
-                        con = false;    
+                        // Intern the identifier
+                        if inserted_id == Identifier::EMPTY {
+                            let base_id = id_arena.intern(node_base);
+                            self.node_set_base_id(node, base_id);
+                            inserted_id = base_id;
+                        } else {
+                            self.node_set_base_id(node, inserted_id);
+                        }
+                        con = false;
+                    }
+                },
+                IdOrderingRelation::B1BeforeB2E => {
+                    let from_node = &mut self.nodes[from];
+                    inserted_id = from_node.base_id;
+                    if let Some(l) = from_node.left {
+                        from = l;
+                    } else {
+                        from_node.left = Some(node);
+                        self.node_set_base_id(node, inserted_id);
+                        con = false;
                     }
                 },
                 IdOrderingRelation::B1InsideB2 => {
-                    // Split the node and insert in the middle
-                    // Find the split point 
                     let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content) = {
-                        let sp = Self::find_split_point(&self.node_get_identifier_interval(from), &node_idi.base);
-                        // println!("Splitting node {} at char offset {})", from, sp);
+                        let from_node = &self.nodes[from];
+                        let f_offset = from_node.offset;
+                        let from_slice = id_arena.get_slice_unchecked(from_node.base_id);
+                        let sp = id_arena.find_split_point(from_slice, f_offset, f_offset + from_node.size as u32, node_base);
+                        // let sp = id_arena.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
-                        let from_content = &from_node.content;
-                        // Find the byte position of the character offset 'sp'
-                        let b_idx = from_content.char_indices()
+                        let from_content_ref = &from_node.content;
+                        let b_idx = from_content_ref.char_indices()
                             .nth(sp as usize)
                             .map(|(idx, _)| idx)
-                            .unwrap_or(from_content.len());
+                            .unwrap_or(from_content_ref.len());
                         let from_content = std::mem::take(&mut from_node.content);
                         (sp, b_idx, &from_node.base_id, from_node.offset, from_node.creator, from_content)
                     };
 
-                    let rcontent = from_content.split_off(b_idx); 
-                    
+                    let rcontent = from_content.split_off(b_idx);
                     let right_node = Node::new(rcontent, from_base_id.clone(), from_offset + sp, from_creator);
-                    let right_idx = &self.alloca(right_node);
+                    let right_idx = self.alloca(right_node);
+
+                    // Detach original_right BEFORE mutating from
+                    let original_right = self.nodes[from].right;
 
                     let from_node = &mut self.nodes[from];
-                    let original_right = from_node.right;
                     from_node.content = from_content;
                     from_node.size = from_node.content.chars().count();
-                    from_node.right = Some(*right_idx);
 
-                    let right_node = &mut self.nodes[*right_idx];
-                    right_node.right = original_right;
-                    right_node.left = Some(node);
+                    // Intern identifier for the new node
+                    if inserted_id == Identifier::EMPTY {
+                        let base_id = id_arena.intern(node_base);
+                        self.node_set_base_id(node, base_id);
+                        inserted_id = base_id;
+                    } else {
+                        self.node_set_base_id(node, inserted_id);
+                    }
 
-                    path.push(*right_idx);
+                    let joined = self.join(Some(node), right_idx, original_right);
+                    self.nodes[from].right = Some(joined);
+
                     con = false;
                 },
                 IdOrderingRelation::B2ConcatB1 => {
-                    // Concat at the end
-                    // We should also check if we are at upper edge of offsets for this block
-                    // As a rule, we will not reinsert IDs which have already been inserted & deleted 
-                    // check base to offsets map 
+                    // We know that the base identifier of the node is same as base of the from node 
                     let b2_base = {
-                        self.nodes[from].base_id.clone() // one clone, only in this rare branch
+                        self.nodes[from].base_id
                     };
+                    let node_base_id = b2_base;
+                    inserted_id = node_base_id;
                     if let Some((_, hi)) = self.base_to_offsets.get(&b2_base) {
-                        if node_idi.lo < *hi {
+                        if node_lo < *hi {
                             let from_node = &mut self.nodes[from];
                             if let Some(r) = from_node.right {
                                 from = r;
@@ -502,61 +543,74 @@ impl Tree {
                             }
                         }
                     }
-                    // Also check if we actually own this 
                     if self.node_creator(from) != site {
                         let from_node = &mut self.nodes[from];
                         if let Some(r) = from_node.right {
-                                from = r;
-                                continue;
-                            } else {
-                                from_node.right = Some(node);
-                                break;
-                            }
+                            from = r;
+                            continue;
+                        } else {
+                            from_node.right = Some(node);
+                            break;
+                        }
                     }
                     let nxt = self.next(from, &path);
                     if let Some(r) = nxt {
-                        // See how much we can insert before clashing with the next ID
                         let r_base = self.node_base_id(r);
                         let r_offset = self.node_ranges(r).0;
-                        let len = content.chars().count() as u32;
-                        let id_insert = IdentifierRef::new(&node_idi.base, node_idi.lo);
-                        let id_next = IdentifierRef::new(r_base, r_offset);
-                        let n_insertable = num_insertable(id_insert, id_next, len);
-                        let from_node = &mut self.nodes[from];
+                        // let id_insert = IdentifierRef::new(node_idi.base, node_idi.lo);
+                        // let id_next = IdentifierRef::new(r_base, r_offset);
+                        let n_insertable = id_arena.num_insertable(node_base_id, node_lo, r_base, r_offset, len);
+                        // let n_insertable = id_arena.num_insertable(id_insert, id_next, len);
                         if n_insertable < len {
-                            // FIXME: just go right, don't bother splitting for now
-                            from = from_node.right.unwrap();
+                            from = self.nodes[from].right.unwrap();
                         } else {
-                            // CHECK 
+                            // take content first, then borrow from_node
+                            let content = std::mem::take(&mut self.nodes[node].content);
+                            let from_node = &mut self.nodes[from];
                             from_node.content.push_str(&content);
-                            from_node.size = from_node.content.chars().count();
+                            from_node.size += len as usize;
+                            self.free(node);
                             con = false;
                         }
                     } else {
-                        // We can extend as much as we want, just concat at the end
+                        let content = std::mem::take(&mut self.nodes[node].content);
                         let from_node = &mut self.nodes[from];
                         from_node.content.push_str(&content);
                         from_node.size = from_node.content.chars().count();
+                        self.free(node);
                         con = false;
                     }
                 },
+
                 IdOrderingRelation::B1EqualsB2 => {
+                    inserted_id = {
+                        let from_node = &self.nodes[from];
+                        from_node.base_id
+                    };
                     con = false;
                 }
                 IdOrderingRelation::B2InsideB1 => {
-                    // Split the incoming node 
-                    let b1 = &mut node_idi;
                     let sp = {
-                        let b2_base = &self.nodes[from].base_id;
-                        Self::find_split_point(&b1, b2_base)
-                    }; 
+                        let b2_base = self.nodes[from].base_id;
+                        let b2_slice = id_arena.get_slice_unchecked(b2_base);
+                        id_arena.find_split_point(node_base, node_lo, node_hi, b2_slice)
+                    };
+                    let content = std::mem::take(&mut self.nodes[node].content);
+                    let byte_idx = content
+                        .char_indices()
+                        .nth(sp as usize)
+                        .map(|(i, _)| i)
+                        .unwrap_or(content.len());
+                    let left_content  = content[..byte_idx].to_string();
+                    let right_content = content[byte_idx..].to_string();
+                    
+                    // FIXME?
+                    let id1 = self.insert_by_id(site, id_arena, node_base, node_lo, left_content);
+                    let id2 = self.insert_by_id(site, id_arena, node_base, node_lo + sp, right_content);
 
-                    let left_content: String = content.chars().take(sp as usize).collect();
-                    let right_content: String = content.chars().skip(sp as usize).collect();
-
-                    // Insert both recursively 
-                    self.insert_by_id(site, b1.base.clone(), b1.lo, left_content);
-                    self.insert_by_id(site, std::mem::take(&mut b1.base), b1.lo + sp, right_content);
+                    // id1 and id2 should be equal 
+                    debug_assert_eq!(id1, id2);
+                    inserted_id = id1;
 
                     self.free(node);
 
@@ -569,7 +623,15 @@ impl Tree {
                         from = l;
                     } else {
                         from_node.left = Some(node);
-                        con = false;    
+                        // Intern the identifier
+                        if inserted_id == Identifier::EMPTY {
+                            let base_id = id_arena.intern(node_base);
+                            self.node_set_base_id(node, base_id);
+                            inserted_id = base_id;
+                        } else {
+                            self.node_set_base_id(node, inserted_id);
+                        }
+                        con = false;
                     }
                 },
             }
@@ -577,7 +639,9 @@ impl Tree {
         if !rec {
             self.rebalance(&path);
         }
-    }    
+        return inserted_id;
+
+    }
 
     pub fn splice(&mut self, path: &[usize], target: usize, replacement: Option<usize>) {
         if path.len() == 1 {
@@ -601,12 +665,12 @@ impl Tree {
         self.rebalance(&path[..path.len()-1]);
     }
 
-    pub fn delete_by_id(&mut self, base: Id, offset: u32) -> Result<(), ()> {
+    pub fn delete_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Result<(), ()> {
         // let mut path: Vec<usize> = vec![];
         if self.is_empty() {
             return Err(())
         }
-        let path= self.find_by_id(base, offset);
+        let path= self.find_by_id(id_arena, base, offset);
         if path.is_empty() {
             return Err(());
         } 
@@ -655,20 +719,26 @@ impl Tree {
          Ok(())
     }
 
-    pub fn find_by_id(&mut self, base: Id, offset: u32) -> Path {
+    pub fn find_by_id(&mut self, id_arena: &IdArena, base: Identifier, offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
         }
-        let node_idi = IdentifierInterval::new(base, offset, offset+1);
         let mut curr = self.root.unwrap();
  
         loop {
             path.push(curr);
-            let b1 = &node_idi;
-            let b2 = &self.node_get_identifier_interval(curr);
+            let cmp = {
+                let b1_base = base;
+                let b1_lo = offset;
+                let b1_hi = offset + 1;
+                let b2_base = self.nodes[curr].base_id;
+                let b2_lo = self.nodes[curr].offset;
+                let b2_hi = b2_lo + self.nodes[curr].size as u32;
+                id_arena.compare_intervals(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
+            };
 
-            match compare_intervals(b1, &b2) {
+            match cmp {
                 IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
                     let from_node = &mut self.nodes[curr];
                     if let Some(r) = from_node.right {
@@ -695,20 +765,27 @@ impl Tree {
         return Path::new();
     }
 
-    pub fn find_by_id_exact(&mut self, base: Id, offset: u32) -> Path {
+    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: &[u32], offset: u32) -> Path {
         let mut path = Path::new();
         if self.is_empty() {
             return Path::new();
         }
-        let node_idi = IdentifierInterval::new(base.clone(), offset, offset + 1);
         let mut curr = self.root.unwrap();
 
         loop {
             path.push(curr);
-            let b1 = &node_idi;
-            let b2 = &self.node_get_identifier_interval(curr);
+            let cmp = {
+                let b1_base = base;
+                let b1_lo = offset;
+                let b1_hi = offset + 1;
+                let curr_node = &self.nodes[curr];
+                let b2_base = curr_node.base_id;
+                let b2_lo = curr_node.offset;
+                let b2_hi = b2_lo + curr_node.size as u32;
+                id_arena.compare_intervals_first_raw(b1_base, b1_lo, b1_hi, b2_base, b2_lo, b2_hi)
+            };
 
-            match compare_intervals(b1, &b2) {
+            match cmp {
                 IdOrderingRelation::B1AfterB2 | IdOrderingRelation::B2ConcatB1 => {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
@@ -725,16 +802,21 @@ impl Tree {
                 }
                 IdOrderingRelation::B1EqualsB2 => {
                     // Exact interval match — still verify base
-                    if self.nodes[curr].base_id == base {
+                    // println!("Probe matches node range exactly, checking base for exact match");
+                    let curr_slice = id_arena.get_slice_unchecked(self.nodes[curr].base_id);
+                    if curr_slice == base {
                         return path;
                     }
                     return Path::new();
+                    // return path;
                 }
                 IdOrderingRelation::B1InsideB2 => {
+                    // println!("Probe inside node range, checking base for exact match");
                     // Probe falls inside this node's range.
                     // Only a real match if the base is identical.
                     // Cannot exist elsewhere in the tree, so return empty if base differs.
-                    if self.nodes[curr].base_id == base {
+                    let curr_slice = id_arena.get_slice_unchecked(self.nodes[curr].base_id);
+                    if curr_slice == base {
                         return path;
                     }
                     return Path::new();
@@ -743,8 +825,247 @@ impl Tree {
             }
         }
     }
+}
 
+impl Tree {
+    #[inline(always)]
+    fn register_base_offsets(&mut self, base: Identifier, offset: u32, size: u32) {
+        if let Some((lo, hi)) = self.base_to_offsets.get(&base) {
+            let new_lo = std::cmp::min(*lo, offset);
+            let new_hi = std::cmp::max(*hi, offset + size);
+            self.base_to_offsets.insert(base, (new_lo, new_hi));
+        } else {
+            self.base_to_offsets.insert(base, (offset, offset + size));
+        }
+    }
+    pub fn insert_after(&mut self, path: &[usize], node: Node) -> usize {
+        let new_idx = self.alloca(node);
+        let n = &self.nodes[new_idx];
+        self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
+        let target = *path.last().unwrap();
+        let mut extended_path: Path = Path::from_slice(path);
+
+        if self.nodes[target].right.is_none() {
+            self.nodes[target].right = Some(new_idx);
+        } else {
+            // Walk to the leftmost node in the right subtree.
+            let mut curr = self.nodes[target].right.unwrap();
+            extended_path.push(curr);
+            while let Some(l) = self.nodes[curr].left {
+                curr = l;
+                extended_path.push(curr);
+            }
+            self.nodes[curr].left = Some(new_idx);
+        }
+
+        self.rebalance(&extended_path);
+        new_idx
+    }
+
+    pub fn insert_before(&mut self, path: &[usize], node: Node) -> usize {
+        let new_idx = self.alloca(node);
+        let n = &self.nodes[new_idx];
+        self.register_base_offsets(n.base_id, n.offset, n.size as u32);
+
+        let target = *path.last().unwrap();
+        let mut extended_path: Path = Path::from_slice(path);
+
+        if self.nodes[target].left.is_none() {
+            self.nodes[target].left = Some(new_idx);
+        } else {
+            // Walk to the rightmost node in the left subtree.
+            let mut curr = self.nodes[target].left.unwrap();
+            extended_path.push(curr);
+            while let Some(r) = self.nodes[curr].right {
+                curr = r;
+                extended_path.push(curr);
+            }
+            self.nodes[curr].right = Some(new_idx);
+        }
+
+        self.rebalance(&extended_path);
+        new_idx
+    }
+
+    pub fn split_and_insert_middle(
+        &mut self,
+        path: &[usize],
+        sp: usize,         
+        middle: Node,
+    ) -> usize {
+        let target = *path.last().unwrap();
+
+        let base_id = self.nodes[target].base_id;
+        let offset  = self.nodes[target].offset;
+        let creator = self.nodes[target].creator;
+        let original_right = self.nodes[target].right;
+
+        let content = std::mem::take(&mut self.nodes[target].content);
+        let byte_idx = content
+            .char_indices()
+            .nth(sp)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let left_content  = content[..byte_idx].to_string();
+        let right_content = content[byte_idx..].to_string();
+
+        // // ── 2. Update target to be the left half ────────────────────────
+        // let left_size = sp;
+        // self.nodes[target].content = left_content;
+        // self.nodes[target].size = left_size;
+        // // target keeps its base_id, offset, creator, and LEFT child.
+
+        // // ── 3. Allocate right half ──────────────────────────────────────
+        // let right_node = Node::new(
+        //     right_content,
+        //     base_id,
+        //     offset + sp as u32,
+        //     creator,
+        // );
+        // let right_idx = self.alloca(right_node);
+        // // Right half inherits target's original right subtree.
+        // self.nodes[right_idx].right = original_right;
+
+        // // ── 4. Allocate middle node ─────────────────────────────────────
+        // let middle_base   = middle.base_id;
+        // let middle_offset = middle.offset;
+        // let middle_size   = middle.size as u32;
+        // let middle_idx = self.alloca(middle);
+        // self.register_base_offsets(middle_base, middle_offset, middle_size);
+
+        // // ── 5. Wire up ─────────────────────────────────────────────────
+        // // middle is the left child of right_half (it comes between left and right
+        // // in in-order). target's right is now right_half.
+        // self.nodes[right_idx].left = Some(middle_idx);
+        // self.nodes[target].right   = Some(right_idx);
+
+        // // ── 6. Rebalance from the deepest new node up to root ───────────
+        // let mut extended_path: Path = Path::from_slice(path);
+        // extended_path.push(right_idx);
+        // extended_path.push(middle_idx);
+        // self.rebalance(&extended_path);
+
+        // middle_idx
+        self.nodes[target].content = left_content;
+        self.nodes[target].size = sp;
+
+        let right_node = Node::new(right_content, base_id, offset + sp as u32, creator);
+        let right_idx = self.alloca(right_node);
+
+        let middle_base   = middle.base_id;
+        let middle_offset = middle.offset;
+        let middle_size   = middle.size as u32;
+        let middle_idx = self.alloca(middle);
+        self.register_base_offsets(middle_base, middle_offset, middle_size);
+
+        // In-order: target(left half), middle_idx, right_idx, original_right...
+        let joined = self.join(Some(middle_idx), right_idx, original_right);
+        self.nodes[target].right = Some(joined);
+
+        self.rebalance(path);  // path ends at target, NOT at right_idx
+        middle_idx
+    }
+
+    /// Delete the node at `path.last()` using the path directly.
+    /// This is the same algorithm as delete_by_id's second half, but skips
+    /// the find_by_id traversal since we already have the path.
+    pub fn delete_at_path(&mut self, path: &[usize]) {
+        if path.is_empty() {
+            return;
+        }
+        let curr = *path.last().unwrap();
+        let left  = self.nodes[curr].left;
+        let right = self.nodes[curr].right;
+
+        match (left, right) {
+            (None, None) => {
+                self.splice(path, curr, None);
+            }
+            (Some(child), None) | (None, Some(child)) => {
+                self.splice(path, curr, Some(child));
+            }
+            (Some(_), Some(r)) => {
+                // Two children: replace with in-order successor, then delete successor.
+                let mut succ_path: Path = Path::from_slice(path);
+                succ_path.push(r);
+                let mut succ = r;
+                while let Some(l) = self.nodes[succ].left {
+                    succ = l;
+                    succ_path.push(succ);
+                }
+
+                // Copy successor's payload into target.
+                // let succ_data = self.nodes[succ].clone();
+                let succ_content = std::mem::take(&mut self.nodes[succ].content);
+                let succ_base    = self.nodes[succ].base_id;
+                let succ_offset  = self.nodes[succ].offset;
+                let succ_size    = self.nodes[succ].size;
+                let succ_creator = self.nodes[succ].creator;
+
+                let tn = &mut self.nodes[curr];
+                tn.content = succ_content;
+                tn.base_id = succ_base;
+                tn.offset  = succ_offset;
+                tn.size    = succ_size;
+                tn.creator = succ_creator;
+
+                // Delete successor 
+                let succ_right = self.nodes[succ].right;
+                self.splice(&succ_path, succ, succ_right);
+            }
+        }
+    }
+
+    pub fn delete_middle_at_path(
+        &mut self,
+        path: &[usize],
+        start: usize,
+        count: usize,
+    ) {
+        let target = *path.last().unwrap();
+        let base_id = self.nodes[target].base_id;
+        let offset  = self.nodes[target].offset;
+        let creator = self.nodes[target].creator;
+        let original_right = self.nodes[target].right;
+
+        let content = std::mem::take(&mut self.nodes[target].content);
+
+        // Find the two byte boundaries with a single pass
+        let mut indices = content.char_indices();
+        let left_byte = indices.nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let mid_byte = indices.nth(count - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+
+        let left_content  = content[..left_byte].to_string();
+        let right_content = content[mid_byte..].to_string();
+
+        self.nodes[target].content = left_content;
+        self.nodes[target].size = start;
+
+        let right_node = Node::new(
+            right_content, base_id, offset + (start + count) as u32, creator,
+        );
+        let right_idx = self.alloca(right_node);
+
+        // In-order: target(left half), right_idx, original_right...
+        // No middle element here — right_idx is the separator
+        let joined = self.join(None, right_idx, original_right);
+        self.nodes[target].right = Some(joined);
+
+        self.rebalance(path);
+    }
+
+    pub fn insert_first(&mut self, node: Node) -> usize {
+        let idx = self.alloca(node);
+        let n = &self.nodes[idx];
+        self.register_base_offsets(n.base_id, n.offset, n.size as u32);
+        self.root = Some(idx);
+        idx
+    }
 }
 
 pub struct InOrderIter<'a> {
@@ -787,16 +1108,16 @@ impl<'a> Iterator for InOrderIter<'a> {
 }
 
 impl Tree {
-    pub fn print_tree(&self) {
+    pub fn print_tree(&self, id_arena: &IdArena) {
         println!("\n===== BLOCK TREE =====");
         match self.root {
-            Some(root) => self.print_node(root, "", true),
+            Some(root) => self.print_node(id_arena, root, "", true),
             None => println!("(empty)"),
         }
         println!("======================\n");
     }
 
-    fn print_node(&self, idx: usize, prefix: &str, is_last: bool) {
+    fn print_node(&self, id_arena: &IdArena, idx: usize, prefix: &str, is_last: bool) {
         let node = &self.nodes[idx];
 
         // formatting helpers
@@ -804,6 +1125,7 @@ impl Tree {
         let right = node.right.map_or("·".to_string(), |x| x.to_string());
 
         let base = &node.base_id;
+        let base = id_arena.get_slice_unchecked(*base);
 
         // trim content for readability
         let content = if node.content.len() > 10 {
@@ -836,14 +1158,14 @@ impl Tree {
 
         match (node.left, node.right) {
             (Some(l), Some(r)) => {
-                self.print_node(l, &new_prefix, false);
-                self.print_node(r, &new_prefix, true);
+                self.print_node(id_arena, l, &new_prefix, false);
+                self.print_node(id_arena, r, &new_prefix, true);
             }
             (Some(l), None) => {
-                self.print_node(l, &new_prefix, true);
+                self.print_node(id_arena, l, &new_prefix, true);
             }
             (None, Some(r)) => {
-                self.print_node(r, &new_prefix, true);
+                self.print_node(id_arena, r, &new_prefix, true);
             }
             (None, None) => {}
         }
@@ -859,16 +1181,17 @@ impl Tree {
 
     /* Function to check whether all the keys in the tree are sorted or not */
     /// collect all the keys inorder and check if they are sorted
-    pub fn check_tree(&self) -> bool {
+    pub fn check_tree(&self, id_arena: &IdArena) -> bool {
         let mut prev_id: Option<Identifier> = None;
         let mut prev_offsets: Option<(u32, u32)> = None;
         for node in self.inorder_iter() {
             let curr_id = node.base_id.clone();
             let (lo, hi) = (node.offset, node.offset + node.size as u32);
             if let Some(prev) = prev_id {
-                let curr_lo = IdentifierRef::new(&curr_id, lo);
-                let prev_hi = IdentifierRef::new(&prev, prev_offsets.unwrap().1-1);
-                if curr_lo <= prev_hi {
+                // let curr_lo = IdentifierRef::new(curr_id, lo);
+                // let prev_hi = IdentifierRef::new(prev, prev_offsets.unwrap().1-1);
+                let cmp = id_arena.compare_refs(curr_id, lo, prev, prev_offsets.unwrap().1 - 1);
+                if cmp != Ordering::Greater {
                     eprintln!("Tree check failed: current id {:?} with offsets {}-{} is not greater than previous id {:?} with offsets {}-{}", curr_id, lo, hi, prev, prev_offsets.unwrap().0, prev_offsets.unwrap().1);
                     return false;
                 }
@@ -878,192 +1201,71 @@ impl Tree {
         }
         true
     }
+
+    pub fn check_avl(&self) -> bool {
+        fn check_avl_rec(tree: &Tree, idx: usize) -> Result<usize, String> {
+            let node = &tree.nodes[idx];
+            let left_height = if let Some(l) = node.left {
+                check_avl_rec(tree, l)?
+            } else {
+                0
+            };
+            let right_height = if let Some(r) = node.right {
+                check_avl_rec(tree, r)?
+            } else {
+                0
+            };
+            if (left_height as isize - right_height as isize).abs() > 1 {
+                return Err(format!("AVL violation at node {}: left height {}, right height {}", idx, left_height, right_height));
+            }
+            Ok(1 + std::cmp::max(left_height, right_height))
+        }
+
+        if let Some(root) = self.root {
+            match check_avl_rec(self, root) {
+                Ok(_) => true,
+                Err(e) => {
+                    println!("{}", e);
+                    false
+                }
+            }
+        } else {
+            true
+        }
+    }
 }
 
-/* 
-Test cases for AVL TREE
-*/
+impl Tree {
+    /// AVL join: merge left subtree `l`, separator node `mid`, and right subtree `r`
+    /// into a single balanced AVL tree.
+    /// Precondition: all keys in l < mid.key < all keys in r.
+    /// O(|height(l) - height(r)|).
+    pub fn join(&mut self, l: Option<usize>, mid: usize, r: Option<usize>) -> usize {
+        let lh = self.node_height(l);
+        let rh = self.node_height(r);
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::identifier::{Id};
+        if (lh - rh).abs() <= 1 {
+            // Heights are close — mid becomes the root directly
+            self.nodes[mid].left = l;
+            self.nodes[mid].right = r;
+            self.update_node(mid);
+            return mid;
+        }
 
-//     fn make_id(x: u32) -> Id {
-//         Identifier::new(vec![x])
-//     }
-
-//     fn check_avl(tree: &Tree, node: Option<usize>) -> (i32, u32) {
-//         /* Check sorted Ids too! */
-
-//         if let Some(idx) = node {
-//             let n = &tree.nodes[idx];
-
-//             let (lh, lc) = check_avl(tree, n.left);
-//             let (rh, rc) = check_avl(tree, n.right);
-
-//             // Height correctness
-//             assert_eq!(n.height, 1 + lh.max(rh));
-
-//             // AVL balance
-//             assert!((rh - lh).abs() <= 1, "AVL violated at node {}", idx);
-
-//             let sz = n.size as u32;
-//             let stree_c = n.subtree_count as u32;
-
-//             // Count correctness
-//             assert_eq!(stree_c, sz + lc + rc);
-
-//             (n.height, stree_c)
-//         } else {
-//             (0, 0)
-//         }
-//     }
-
-//     /* Complete check AVL function which checks that IDs are sorted in the AVL tree as well as balance heights etc. */
-
-//     fn collect_inorder(tree: &Tree) -> Vec<(String, u32, String)> {
-//         tree.inorder_iter()
-//             .map(|n| (n.base_id.to_string(), n.offset, n.content.clone()))
-//             .collect()
-//     }
-
-//     #[test]
-//     fn test_basic_append() {
-//         let mut tree = Tree::new();
-
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1]}, 0, "ABC".to_string());
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1]}, 3, "DEF".to_string());
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1]}, 6, "GHI".to_string());
-        
-//         let inorder = collect_inorder(&tree);
-        
-//         tree.print_tree();
-
-//         assert_eq!(inorder, vec![
-//             ("1.0.1".to_string(), 0, "ABCDEFGHI".to_string()),
-//         ]);
-
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_basic_split_1() {
-//         let mut tree = Tree::new();
-
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1]}, 0, "Hello".to_string());
-//         tree.insert_by_id(0, Identifier {id: vec![7,0,0]}, 0, "World".to_string());
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1,2,3,4]}, 0, "AAAAAAA".to_string());
-        
-//         let inorder = collect_inorder(&tree);
-        
-//         tree.print_tree();
-
-//         println!("{}", tree.read());
-
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_basic_split_2() {
-//         let mut tree = Tree::new();
-
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1]}, 0, "Hello".to_string());
-//         // tree.print_tree();
-//         tree.insert_by_id(0, Identifier {id: vec![7,0,0]}, 0, "World".to_string());
-//         // tree.print_tree();
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1,2,3,4]}, 0, "AAAAAAA".to_string());
-//         // tree.print_tree();
-//         tree.insert_by_id(0, Identifier {id: vec![1,0,1,2,3,4,2,1,5,7]}, 0, "p".to_string());
-//         tree.print_tree();
-
-//         let inorder = collect_inorder(&tree);
-        
-//         tree.print_tree();
-
-//         println!("{}", tree.read());
-
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_split_in_middle() {
-//         let mut tree = Tree::new();
-//         tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
-//         tree.insert_by_id(1, Identifier { id: vec![5, 2, 7] }, 0, "X".to_string());
-//         assert_eq!(tree.read(), "ABCXDE");
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_split_near_beginning() {
-//         let mut tree = Tree::new();
-//         tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
-//         tree.insert_by_id(1, Identifier { id: vec![5, 0, 9, 9] }, 0, "X".to_string());
-//         assert_eq!(tree.read(), "AXBCDE");
-//         check_avl(&tree, tree.root);
-//     }
-
-//         #[test]
-//     fn test_split_near_end() {
-//         let mut tree = Tree::new();
-//         tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
-//         tree.insert_by_id(1, Identifier { id: vec![5, 3, 9, 9] }, 0, "X".to_string());
-//         assert_eq!(tree.read(), "ABCDXE");
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_two_successive_splits() {
-//         let mut tree = Tree::new();
-//         tree.insert_by_id(0, Identifier { id: vec![5] }, 0, "ABCDE".to_string());
-//         tree.insert_by_id(1, Identifier { id: vec![5, 2, 7] }, 0, "X".to_string());
-//         tree.insert_by_id(2, Identifier { id: vec![5, 1, 8] }, 0, "Y".to_string());
-//         assert_eq!(tree.read(), "ABYCXDE");
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_three_concurrent_sites() {
-//         let mut tree = Tree::new();
-//         tree.insert_by_id(2, Identifier { id: vec![70] }, 0, "Rust".to_string());
-//         tree.insert_by_id(0, Identifier { id: vec![10] }, 0, "Hello".to_string());
-//         tree.insert_by_id(1, Identifier { id: vec![40] }, 0, "from".to_string());
-//         assert_eq!(tree.read(), "HellofromRust");
-//         check_avl(&tree, tree.root);
-//     }
-
-//     #[test]
-//     fn test_avl_ascending_insertion() {
-//         let mut tree = Tree::new();
-//         for i in 0..10u32 {
-//             tree.insert_by_id(
-//                 0,
-//                 Identifier { id: vec![i * 10 + 10] },
-//                 0,
-//                 char::from_u32('A' as u32 + i).unwrap().to_string(),
-//             );
-//         }
-//         assert_eq!(tree.read(), "ABCDEFGHIJ");
-//         check_avl(&tree, tree.root);
-//         // AVL height should be at most 5 for 10 nodes
-//         let height = tree.nodes[tree.root.unwrap()].height;
-//         assert!(height <= 5, "Expected height ≤ 5, got {}", height);
-//     }
-
-//     #[test]
-//     fn test_mixed_splits_and_prepend() {
-//         let mut tree = Tree::new();
-//         tree.insert_by_id(0, Identifier { id: vec![50] }, 0, "WXYZ".to_string());
-//         tree.insert_by_id(1, Identifier { id: vec![50, 1, 9] }, 0, "M".to_string());
-//         tree.insert_by_id(2, Identifier { id: vec![50, 0, 5] }, 0, "N".to_string());
-//         tree.insert_by_id(0, Identifier { id: vec![10] }, 0, "START".to_string());
-//         assert_eq!(tree.read(), "STARTWN XM YZ".replace(' ', ""));
-//         // Written out explicitly so the intent is obvious:
-//         assert_eq!(tree.read(), "STARTWNXMyz".replace("yz","YZ"));
-//         // Unambiguous form:
-//         assert_eq!(tree.read(), "STARTWN XMYZ".replace(" ",""));
-//         check_avl(&tree, tree.root);
-//     }
-
-// }
+        if lh > rh + 1 {
+            // Left tree is taller: walk down its right spine
+            let li = l.unwrap();
+            let lr = self.nodes[li].right;
+            let new_right = self.join(lr, mid, r);
+            self.nodes[li].right = Some(new_right);
+            self.avl_fix(li)
+        } else {
+            // Right tree is taller: walk down its left spine
+            let ri = r.unwrap();
+            let rl = self.nodes[ri].left;
+            let new_left = self.join(l, mid, rl);
+            self.nodes[ri].left = Some(new_left);
+            self.avl_fix(ri)
+        }
+    }
+}
