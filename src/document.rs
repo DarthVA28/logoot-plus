@@ -4,16 +4,16 @@ use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, Range, generate_
 use crate::node::Node;
 use crate::tree::{DelLocation, Path, Tree};
 use crate::state::State;
-use crate::operation::{OpLog, Operation, OperationType, WireOperation};
+use crate::delta::{Delta, OperationType, WireDelta};
+use crate::dotstore::{DotStore, Dot};
 
 #[derive(Clone, Debug)]
 pub struct Document { 
     pub blocks: Tree,
     pub id_arena: IdArena,
     state: State,
-    used_ranges_for_id: HashMap<Identifier, Range>,
     snapshot: String,
-    pub oplog: OpLog,
+    pub dotstore: DotStore,
     debug: bool,
     fresh: bool,
 }
@@ -24,9 +24,8 @@ impl Document {
             blocks: Tree::new(),
             id_arena: IdArena::new(),
             state: State::new(id),
-            used_ranges_for_id: HashMap::new(),
             snapshot: String::new(),
-            oplog: OpLog::new(),
+            dotstore: DotStore::new(),
             debug: false,
             fresh: true,
         }
@@ -40,8 +39,9 @@ impl Document {
         self.state.replica
     }
 
-    pub fn ins(&mut self, pos: usize, text: String) -> Option<WireOperation>{
-        if text == "" {
+    pub fn ins(&mut self, pos: usize, text: String) -> Option<WireDelta>{
+        let text_len = text.len() as u32;
+        if text_len == 0 {
             // For empty inserts   
             return None;
         }
@@ -56,14 +56,13 @@ impl Document {
         // println!("After local insert at replica {}", self.state.replica);
         // self.blocks.print_tree(&self.id_arena);
 
-        self.oplog.record_op(&op);
-        self.state.local_clock += 1;
+        self.dotstore.record_delta(&op);
+        self.state.local_clock += text_len;
         self.fresh = false;
         Some(op.to_wire(&self.id_arena))
     }
 
-    pub fn del(&mut self, from: usize, to: usize) -> WireOperation {
-        // println!("Deleting from {} to {} at site {}", from, to, self.state.replica);
+    pub fn del(&mut self, from: usize, to: usize) -> WireDelta {
         let op = local_delete(self, from, to);
         if self.debug {
             if !self.blocks.check_tree(&self.id_arena) {
@@ -71,10 +70,8 @@ impl Document {
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
-        // println!("After local delete at replica {}", self.state.replica);
-        // self.blocks.print_tree(&self.id_arena);
-        self.oplog.record_op(&op);
-        self.state.local_clock += 1;
+        self.dotstore.record_delta(&op);
+        self.state.local_clock += (to - from) as u32;
         self.fresh = false;
         op.to_wire(&self.id_arena)
     }
@@ -92,12 +89,12 @@ impl Document {
         res
     }
 
-    pub fn apply_remote_op(&mut self, wire_op: &WireOperation) {
+    pub fn apply_remote_op(&mut self, wire_op: &WireDelta) {
         // let op = Operation::from_wire(wire_op, &mut self.id_arena);
         self.apply_op(wire_op);
     }
 
-    pub fn apply_op(&mut self, op: &WireOperation) {
+    pub fn apply_op(&mut self, op: &WireDelta) {
         // We are ready to apply this operation, first record it in the oplog and then apply it
         // let ins_id = Identifier::EMPTY;
         // println!("Applying op {:?} from site {} at site {}", op, op.site, self.state.replica);
@@ -123,8 +120,8 @@ impl Document {
 
         // Some operations can now possibly be applied!
         if op.op_type == OperationType::Insert {
-            for (id, _, _) in &op.ids {
-                let pending_ops = self.oplog.get_pending_for_id(id);
+            for (dot, _, _, _) in &op.ids {
+                let pending_ops = self.dotstore.get_pending_for_dot(dot);
                 for op in pending_ops {
                     self.apply_op(&op);
                 }
@@ -146,55 +143,50 @@ impl Document {
     pub fn reset (&mut self) {
         self.blocks.clear();
         self.id_arena.clear();
-        self.used_ranges_for_id.clear();
         self.snapshot.clear();
-        self.oplog.clear();
+        self.dotstore.clear();
         self.state.local_clock = 1;
         self.fresh = true;
     }
 
 }
 
-fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, site: u32) -> Operation {
+fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, site: u32) -> Delta {
     let next = doc.blocks.next(block, path);
     let insert_base = doc.blocks.node_base_id(block);
     let insert_offsets = doc.blocks.node_ranges(block);
+    let text_len = text.len() as u32;
  
     if let Some(nxt_block) = next {
-        let text_len = text.chars().count() as u32;
         let next_base = doc.blocks.node_base_id(nxt_block);
         let next_offsets = doc.blocks.node_ranges(nxt_block);
-        // let id_insert = IdentifierRef::new(insert_base, insert_offsets.1);
-        // let id_next   = IdentifierRef::new(next_base, next_offsets.0);
-        // let n = doc.id_trie.num_insertable(id_insert, id_next, text_len);
         let n = doc.id_arena.num_insertable(insert_base, insert_offsets.1, next_base, next_offsets.0, text_len);
         if n < text_len {
             // Can't extend — not enough room before the next block.
             let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state);
             let node = Node::new(text.clone(), base, 0, site);
             doc.blocks.insert_after(path, node);
-            return Operation {
+            return Delta {
                 op_type: OperationType::Insert,
-                ids: vec![(base, 0, 1)],
+                ids: vec![(Dot{ site, seq: doc.state.local_clock}, base, 0, text_len)],
                 payload: Some(text),
                 site,
-                clock: doc.state.local_clock,
             };
         }
     }
  
     doc.blocks.extend_content(block, &text, path);
-    Operation {
+    Delta {
         op_type: OperationType::Insert,
-        ids: vec![(insert_base, insert_offsets.1, insert_offsets.1 + 1)],
+        ids: vec![(Dot{ site, seq: doc.state.local_clock}, insert_base, insert_offsets.1, insert_offsets.1 + text_len)],
         payload: Some(text),
         site,
-        clock: doc.state.local_clock,
     }
 }
 
-fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
+fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     let doc_size = doc.blocks.tree_size();
+    let text_len = text.len() as u32;
     let pos = if pos > doc_size { doc_size } else { pos };
  
     let (path, covered) = doc.blocks.find_by_pos(pos);
@@ -204,12 +196,11 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
         let node = Node::new(text.clone(), base, 0, doc.state.replica);
         doc.blocks.insert_first(node);
-        return Operation {
+        return Delta {
             op_type: OperationType::Insert,
-            ids: vec![(base, 0, 1)],
+            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
             payload: Some(text),
             site: doc.state.replica,
-            clock: doc.state.local_clock,
         };
     }
  
@@ -246,12 +237,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         // *** DIRECT: insert_after uses the path, no find_by_id ***
         doc.blocks.insert_after(&path, node);
  
-        return Operation {
+        return Delta {
             op_type: OperationType::Insert,
-            ids: vec![(base, 0, 1)],
+            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
             payload: Some(text),
             site: doc.state.replica,
-            clock: doc.state.local_clock,
+            // clock: doc.state.local_clock,
         };
     }
  
@@ -272,12 +263,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
         // *** DIRECT: insert_before uses the path, no find_by_id ***
         doc.blocks.insert_before(&path, node);
  
-        return Operation {
+        return Delta {
             op_type: OperationType::Insert,
-            ids: vec![(base, 0, 1)],
+            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
             payload: Some(text),
             site: doc.state.replica,
-            clock: doc.state.local_clock,
+            // clock: doc.state.local_clock,
         };
     }
  
@@ -295,19 +286,20 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Operation {
  
     doc.blocks.split_and_insert_middle(&path, sp as usize, middle);
  
-    Operation {
+    Delta {
         op_type: OperationType::Insert,
-        ids: vec![(base, 0, 1)],
+        ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
         payload: Some(text),
         site: doc.state.replica,
-        clock: doc.state.local_clock,
+        // clock: doc.state.local_clock,
     }
 }
 
-fn remote_insert(doc: &mut Document, op: &WireOperation) -> Identifier {
+fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
     let val = op.ids[0].clone();
-    let base  = val.0;
-    let offset = val.1;
+    let dot = val.0;
+    let base  = val.1;
+    let offset = val.2;
     let text = op.payload.as_ref().expect("No payload for insert operation");
     let site = op.site;
 
@@ -315,9 +307,10 @@ fn remote_insert(doc: &mut Document, op: &WireOperation) -> Identifier {
     doc.blocks.insert_by_id(site, &mut doc.id_arena, &base, offset, text.to_string())
 }
 
-fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
+fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
     let mut num_delete = to - from;
-    let mut del_info: Vec<(Identifier, u32, u32)> = vec![];
+    let mut del_info = vec![];
+    let mut seq: usize = 0;
     let curr = from;
  
     while num_delete > 0 {
@@ -335,43 +328,46 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Operation {
  
         if start_del == 0 && end_del >= block_size {
             // ── Case 1: delete entire block ─────────────────────────────
-            del_info.push((base_id, block_ranges.0, block_ranges.1));
+            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0, block_ranges.1));
             num_delete -= block_size;
+            seq += block_size;
  
             // *** DIRECT: uses path, no find_by_id ***
             doc.blocks.delete_at_path(&path);
  
         } else if start_del == 0 {
             // ── Case 2: delete from start of block ──────────────────────
-            del_info.push((base_id, block_ranges.0, block_ranges.0 + end_del as u32));
+            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0, block_ranges.0 + end_del as u32));
             doc.blocks.truncate_content(block, num_delete, DelLocation::Start, &path);
+            seq += num_delete;
             num_delete = 0;
  
         } else if end_del >= block_size {
             let n = block_size - start_del;
-            del_info.push((base_id, block_ranges.0 + start_del as u32, block_ranges.1));
+            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0 + start_del as u32, block_ranges.1));
             doc.blocks.truncate_content(block, n, DelLocation::End, &path);
             num_delete -= n;
+            seq += n;
  
         } else {
-            del_info.push((base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
+            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
             doc.blocks.delete_middle_at_path(&path, start_del, num_delete);
+            seq += num_delete;
             num_delete = 0;
         }
     }
  
-    Operation {
+    Delta {
         op_type: OperationType::Delete,
         ids: del_info,
         payload: None,
         site: doc.state.replica,
-        clock: doc.state.local_clock,
     }
 }
 
-fn remote_delete(doc: &mut Document, op: &WireOperation) {
+fn remote_delete(doc: &mut Document, op: &WireDelta) {
     let del_ids = &op.ids;
-    for (id, start, end) in del_ids {
+    for (dot, id, start, end) in del_ids {
         // println!("Remote delete of id {:?} from offset {} to {} at site {} at replica {}", id, start, end, op.site, doc.state.replica);
         // start is inclusive, end is exclusive
         let offsets_len = end - start;
@@ -380,20 +376,6 @@ fn remote_delete(doc: &mut Document, op: &WireOperation) {
             // FIXME: place of inefficiency
             let path = doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed);
             if path.is_empty() {
-                // Base id not in tree at all
-                // Buffer the entire remaining range [start+processed, end) as ONE op.
-                // if doc.blocks.base_id_max_offset(*id).map_or(true, |hi| hi <= start + processed) {
-                //     let partial_op = WireOperation {
-                //         op_type: OperationType::Delete,
-                //         ids: vec![(id.clone(), start + processed, *end)],
-                //         payload: None,
-                //         site: op.site,
-                //         clock: op.clock,
-                //     };
-                //     doc.oplog.add_to_pending(partial_op);
-                //     break; 
-                // }
-
                 // base id exists but this offset is missing 
                 let missing_start = start + processed;
                 processed += 1;
@@ -404,14 +386,13 @@ fn remote_delete(doc: &mut Document, op: &WireOperation) {
                         break;
                     }
                 }
-                let partial_op = WireOperation {
+                let partial_op = WireDelta {
                     op_type: OperationType::Delete,
-                    ids: vec![(id.clone(), missing_start, start + processed)],
+                    ids: vec![(dot.clone(), id.clone(), missing_start, start + processed)],
                     payload: None,
                     site: op.site,
-                    clock: op.clock,
                 };
-                doc.oplog.add_to_pending(partial_op);
+                doc.dotstore.add_to_pending(partial_op);
                 continue;
 
             }

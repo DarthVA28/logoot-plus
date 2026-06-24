@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::document::Document;
-use crate::operation::{WireOperation};
+use crate::delta::{WireDelta};
 use crate::LogootSplitSystem;
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -41,9 +41,9 @@ pub struct TraceStats {
 #[derive(Clone, Debug)]
 pub struct GeneratedTrace {
     pub trace: TraceFile,
-    pub local_ops: Vec<Vec<WireOperation>>,
-    pub remote_ops: Vec<Vec<WireOperation>>,
-    pub all_ops: Vec<WireOperation>,
+    pub local_ops: Vec<Vec<WireDelta>>,
+    pub remote_ops: Vec<Vec<WireDelta>>,
+    pub all_ops: Vec<WireDelta>,
     pub stats: TraceStats,
 }
 
@@ -125,9 +125,9 @@ fn generate_operations_impl(
 
     let mut system = LogootSplitSystem::new(trace.num_agents);
 
-    let mut local_ops = vec![Vec::<WireOperation>::new(); trace.num_agents];
-    let mut remote_ops = vec![Vec::<WireOperation>::new(); trace.num_agents];
-    let mut all_ops = Vec::<WireOperation>::new();
+    let mut local_ops = vec![Vec::<WireDelta>::new(); trace.num_agents];
+    let mut remote_ops = vec![Vec::<WireDelta>::new(); trace.num_agents];
+    let mut all_ops = Vec::<WireDelta>::new();
 
     let mut patch_count = 0usize;
     let order = schedule_txns(&trace)?;
@@ -306,7 +306,7 @@ pub fn measure_merge_remote_cpu(
     ))
 }
 
-pub fn write_oplog(path: &Path, ops: &[WireOperation]) -> Result<(), String> {
+pub fn write_oplog(path: &Path, ops: &[WireDelta]) -> Result<(), String> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -375,7 +375,7 @@ pub fn reload_from_disk_cpu_once(
     let start = Instant::now();
     let bytes = fs::read(ops_path)
         .map_err(|e| format!("failed to read operation log {}: {e}", ops_path.display()))?;
-    let ops = serde_json::from_slice::<Vec<WireOperation>>(&bytes)
+    let ops = serde_json::from_slice::<Vec<WireDelta>>(&bytes)
         .map_err(|e| format!("failed to deserialize operation log {}: {e}", ops_path.display()))?;
 
     let mut doc = Document::new(target as u32);
@@ -440,9 +440,9 @@ fn apply_patch_to_sender(
     sender: usize,
     patch: &Patch,
     target_mask: &[bool],
-    local_ops: &mut [Vec<WireOperation>],
-    remote_ops: &mut [Vec<WireOperation>],
-    all_ops: &mut Vec<WireOperation>,
+    local_ops: &mut [Vec<WireDelta>],
+    remote_ops: &mut [Vec<WireDelta>],
+    all_ops: &mut Vec<WireDelta>,
 ) -> Result<(), String> {
     let sender_u32 = sender as u32;
     let sender_idx = system.network.index_of(sender_u32);
@@ -528,12 +528,12 @@ fn utf16_to_char_index(text: &str, utf16_index: usize) -> usize {
 }
 
 fn record_op(
-    op: WireOperation,
+    op: WireDelta,
     sender: usize,
     target_mask: &[bool],
-    local_ops: &mut [Vec<WireOperation>],
-    remote_ops: &mut [Vec<WireOperation>],
-    all_ops: &mut Vec<WireOperation>,
+    local_ops: &mut [Vec<WireDelta>],
+    remote_ops: &mut [Vec<WireDelta>],
+    all_ops: &mut Vec<WireDelta>,
 ) {
     if target_mask[sender] {
         local_ops[sender].push(op.clone());
