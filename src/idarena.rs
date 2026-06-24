@@ -323,62 +323,150 @@ impl IdArena {
 
     /// How many characters from `insert` can be placed before `next`.
     /// Replaces the old num_insertable(IdentifierRef, IdentifierRef, u32).
+    // pub fn num_insertable(
+    //     &self,
+    //     insert_base: Identifier, insert_extra: u32,
+    //     next_base: Identifier, next_extra: u32,
+    //     length: u32,
+    // ) -> u32 {
+    //     let insert_slice = self.get_slice_unchecked(insert_base);
+    //     let next_slice = self.get_slice_unchecked(next_base);
+
+    //     let l = insert_slice.len();
+
+    //     if l >= next_slice.len() + 1 { return length; }
+
+    //     let next_full_iter = next_slice.iter().chain(std::iter::once(&next_extra));
+    //     for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
+    //         if a != b { return length; }
+    //     }
+
+    //     let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
+    //     next_at_l + 1 - insert_extra
+    // }
+    
     pub fn num_insertable(
         &self,
-        insert_base: Identifier, insert_extra: u32,
-        next_base: Identifier, next_extra: u32,
+        insert_base: Identifier, insert_seq: u32,
+        next_base: Identifier, next_seq: u32,
         length: u32,
     ) -> u32 {
         let insert_slice = self.get_slice_unchecked(insert_base);
         let next_slice = self.get_slice_unchecked(next_base);
+        let ilen = insert_slice.len();
 
-        let l = insert_slice.len();
+        // If insert base is at least as deep as next's full position,
+        // insert can never be a prefix of next → all chars fit.
+        // next_full has length next_slice.len() + 1.
+        if ilen >= next_slice.len() + 1 {
+            return length;
+        }
 
-        if l >= next_slice.len() + 1 { return length; }
-
-        let next_full_iter = next_slice.iter().chain(std::iter::once(&next_extra));
+        // Check that insert_base is a prefix of next_full = next_slice ++ [next_seq]
+        let next_full_iter = next_slice.iter().chain(std::iter::once(&next_seq));
         for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
             if a != b { return length; }
         }
 
-        let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
-        next_at_l + 1 - insert_extra
+        // insert_base IS a prefix of next_full.
+        // The constraining element is next_full[ilen].
+        let constraining = if ilen < next_slice.len() {
+            next_slice[ilen]
+        } else {
+            next_seq
+        };
+
+        // If ilen < next_slice.len(): the constraining element is a seq from a
+        // prefix tuple, and there are more elements after it in next_full.
+        // insert_seq + k == constraining means insert's position is a prefix of next → fits.
+        // So count = constraining + 1 - insert_seq.
+        //
+        // If ilen == next_slice.len(): constraining == next_seq, and this is the LAST
+        // element. insert_seq + k == next_seq means EQUAL positions → does NOT fit.
+        // So count = constraining - insert_seq = next_seq - insert_seq.
+
+        let count = if ilen < next_slice.len() {
+            constraining + 1 - insert_seq
+        } else {
+            // Same depth: strict less-than needed
+            constraining - insert_seq
+        };
+
+        count.min(length)
     }
 
+
     /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
+    // pub fn find_split_point(
+    //     &self,
+    //     short_slice: &[u32], short_lo: u32, short_hi: u32,
+    //     long_slice: &[u32],
+    // ) -> u32 {
+    //     if long_slice.is_empty() { return 0; }
+
+    //     let text_len = short_hi - short_lo;
+    //     if text_len == 0 { return 0; }
+
+    //     // let long_slice = self.get_slice_unchecked(id_long);
+    //     // let short_slice = self.get_slice_unchecked(short_base);
+
+    //     let min_len = short_slice.len().min(long_slice.len());
+
+    //     let short_prefix = unsafe { short_slice.get_unchecked(..min_len) };
+    //     let long_prefix = unsafe { long_slice.get_unchecked(..min_len) };
+    //     match short_prefix.cmp(long_prefix) {
+    //         Ordering::Less  => return text_len,
+    //         Ordering::Greater => return 0,
+    //         Ordering::Equal => {}
+    //     }
+
+    //     if short_slice.len() < long_slice.len() {
+    //         let pivot = unsafe { *long_slice.get_unchecked(min_len) };
+    //         let extras_below = if long_slice.len() > min_len + 1 {
+    //             pivot.saturating_add(1).saturating_sub(short_lo)
+    //         } else {
+    //             pivot.saturating_sub(short_lo)
+    //         };
+    //         return extras_below.min(text_len);
+    //     } else {
+    //         return 0;
+    //     }
+    // }
+
     pub fn find_split_point(
         &self,
-        short_slice: &[u32], short_lo: u32, short_hi: u32,
-        long_slice: &[u32],
+        short_base: &[u32], short_lo: u32, short_hi: u32,
+        long_base: &[u32],
     ) -> u32 {
-        if long_slice.is_empty() { return 0; }
-
         let text_len = short_hi - short_lo;
-        if text_len == 0 { return 0; }
+        if long_base.is_empty() || text_len == 0 { return 0; }
 
-        // let long_slice = self.get_slice_unchecked(id_long);
-        // let short_slice = self.get_slice_unchecked(short_base);
-
-        let min_len = short_slice.len().min(long_slice.len());
-
-        let short_prefix = unsafe { short_slice.get_unchecked(..min_len) };
-        let long_prefix = unsafe { long_slice.get_unchecked(..min_len) };
-        match short_prefix.cmp(long_prefix) {
-            Ordering::Less  => return text_len,
-            Ordering::Greater => return 0,
-            Ordering::Equal => {}
+        let min_len = short_base.len().min(long_base.len());
+        // Verify prefix match
+        if short_base[..min_len] != long_base[..min_len] {
+            return if short_base[..min_len] < long_base[..min_len] {
+                text_len
+            } else {
+                0
+            };
         }
 
-        if short_slice.len() < long_slice.len() {
-            let pivot = unsafe { *long_slice.get_unchecked(min_len) };
-            let extras_below = if long_slice.len() > min_len + 1 {
-                pivot.saturating_add(1).saturating_sub(short_lo)
-            } else {
-                pivot.saturating_sub(short_lo)
-            };
-            return extras_below.min(text_len);
+        if short_base.len() < long_base.len() {
+            // long extends short. Element at short_base.len() is a seq number.
+            debug_assert!(long_base.len() - short_base.len() >= 3,
+                "tuple structure violated: bases differ by {} elements",
+                long_base.len() - short_base.len());
+
+            let seq_value = long_base[short_base.len()];
+            // Position (…, seq_value, next_priority, next_replica, next_seq)
+            // falls between character at seq_value and seq_value+1 in the block.
+            // Characters [short_lo, seq_value] go left → count = seq_value + 1 - short_lo
+            let chars_left = seq_value.saturating_add(1).saturating_sub(short_lo);
+            chars_left.min(text_len)
         } else {
-            return 0;
+            // short_base.len() >= long_base.len() → long is a prefix of short.
+            // The long position comes before all positions in the short block.
+            0
         }
     }
 
@@ -404,31 +492,104 @@ impl IdArena {
     }
 }
 
+// pub fn generate_base(
+//     arena: &mut IdArena,
+//     low_base: Identifier, low_extra: u32,
+//     high_base: Identifier, high_extra: u32,
+//     state: &mut State,
+// ) -> Identifier {
+//     let low_slice = arena.get_slice(low_base);
+//     let high_slice = arena.get_slice(high_base);
+
+//     let mut new_path: Vec<u32> = Vec::new();
+//     let mut low_iter = low_slice.iter().copied().chain(std::iter::once(low_extra));
+//     let mut high_iter = high_slice.iter().copied().chain(std::iter::once(high_extra));
+
+//     let mut l = low_iter.next().unwrap_or(MIN_VALUE);
+//     let mut h = high_iter.next().unwrap_or(MAX_VALUE);
+
+//     while (h as i32) - (l as i32) < 2 {
+//         new_path.push(l);
+//         l = low_iter.next().unwrap_or(MIN_VALUE);
+//         h = high_iter.next().unwrap_or(MAX_VALUE);
+//     }
+
+//     let nxt = state.rng.random_range(l + 1..h);
+//     new_path.push(nxt);
+//     new_path.push(state.replica + state.local_clock * MAX_AGENTS);
+
+//     arena.intern(&new_path)
+// }
+
 pub fn generate_base(
     arena: &mut IdArena,
     low_base: Identifier, low_extra: u32,
     high_base: Identifier, high_extra: u32,
     state: &mut State,
 ) -> Identifier {
+    // Reconstruct full positions: base ++ [seq]
     let low_slice = arena.get_slice(low_base);
     let high_slice = arena.get_slice(high_base);
 
+    // let mut low_full = SmallVec::from_slice(low_slice);
+    // low_full.push(low_extra);
+    // let mut high_full = SmallVec::from_slice(high_slice);
+    // high_full.push(high_extra);
+
+    let mut low_full: Vec<u32> = Vec::with_capacity(low_slice.len() + 1);
+    low_full.extend_from_slice(low_slice);
+    low_full.push(low_extra);
+
+    let mut high_full: Vec<u32> = Vec::with_capacity(high_slice.len() + 1);
+    high_full.extend_from_slice(high_slice);
+    high_full.push(high_extra);
+
     let mut new_path: Vec<u32> = Vec::new();
-    let mut low_iter = low_slice.iter().copied().chain(std::iter::once(low_extra));
-    let mut high_iter = high_slice.iter().copied().chain(std::iter::once(high_extra));
+    let mut depth = 0;
+    let mut high_unconstrained = false;
 
-    let mut l = low_iter.next().unwrap_or(MIN_VALUE);
-    let mut h = high_iter.next().unwrap_or(MAX_VALUE);
+    loop {
+        let l_p = low_full.get(depth * 3).copied().unwrap_or(MIN_VALUE);
+        let h_p = if high_unconstrained {
+            MAX_VALUE
+        } else {
+            high_full.get(depth * 3).copied().unwrap_or(MAX_VALUE)
+        };
 
-    while (h as i32) - (l as i32) < 2 {
-        new_path.push(l);
-        l = low_iter.next().unwrap_or(MIN_VALUE);
-        h = high_iter.next().unwrap_or(MAX_VALUE);
+        // Paper constraint: last tuple priority > MIN_VALUE.
+        // Enforce by using (MIN_VALUE + 1) as the effective lower bound
+        // when low is exhausted (depth > 0).
+        let effective_l = if depth > 0 && low_full.get(depth * 3).is_none() {
+            MIN_VALUE  // will get +1 in the random range below
+        } else {
+            l_p
+        };
+
+        if (h_p as i64) - (effective_l as i64) >= 2 {
+            let chosen = state.rng.random_range(effective_l + 1..h_p);
+            new_path.push(chosen);
+            new_path.push(state.replica);
+            // seq = state.local_clock, applied as offset by the caller
+            return arena.intern(&new_path);
+        }
+
+        // No gap in priority space — copy low's full tuple and descend
+        let l_r = low_full.get(depth * 3 + 1).copied().unwrap_or(0);
+        let l_s = low_full.get(depth * 3 + 2).copied().unwrap_or(MIN_VALUE);
+        new_path.push(l_p);
+        new_path.push(l_r);
+        new_path.push(l_s);
+
+        // Once we've copied a tuple that is strictly less than high's tuple
+        // at the same depth, the high bound at all deeper depths is unconstrained.
+        if !high_unconstrained {
+            let h_r = high_full.get(depth * 3 + 1).copied().unwrap_or(u32::MAX);
+            let h_s = high_full.get(depth * 3 + 2).copied().unwrap_or(u32::MAX);
+            if (l_p, l_r, l_s) < (h_p, h_r, h_s) {
+                high_unconstrained = true;
+            }
+        }
+
+        depth += 1;
     }
-
-    let nxt = state.rng.random_range(l + 1..h);
-    new_path.push(nxt);
-    new_path.push(state.replica + state.local_clock * MAX_AGENTS);
-
-    arena.intern(&new_path)
 }

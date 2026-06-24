@@ -1,5 +1,6 @@
 use std::collections::{HashSet, HashMap};
-use crate::{delta::{Delta, WireDelta}, idarena::{IdArena, Identifier}};
+
+use crate::{delta::{Delta, OperationType, WireDelta}};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Dot { 
@@ -24,6 +25,9 @@ impl DotStore {
         // Update versions and missing for each dot in the delta
         // Note: The dot for each operation is the dot for the *first* ID in the operation. 
         // We need to increment by # of ids in the operation
+        if op.op_type != OperationType::Insert {
+            return;
+        }
         for (dot, _id, lo, hi) in &op.ids {
             let site_version = self.versions.entry(dot.site).or_insert(0);
             if dot.seq > *site_version + 1 {

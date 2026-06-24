@@ -1,4 +1,3 @@
-use std::collections::{HashSet, HashMap};
 use crate::dotstore::{Dot};
 
 use crate::idarena::{IdArena, Identifier};

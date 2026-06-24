@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, Range, generate_base};
+use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, generate_base};
 use crate::node::Node;
 use crate::tree::{DelLocation, Path, Tree};
 use crate::state::State;
@@ -297,7 +295,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
 
 fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
     let val = op.ids[0].clone();
-    let dot = val.0;
+    let _dot = val.0;
     let base  = val.1;
     let offset = val.2;
     let text = op.payload.as_ref().expect("No payload for insert operation");
