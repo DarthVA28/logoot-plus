@@ -250,13 +250,38 @@ impl Tree {
         }
     }
 
+    // fn rebalance(&mut self, node: Option<usize>) {
+    //     let mut curr = node;
+    //     while let Some(idx) = curr {
+    //         let par = self.nodes[idx].parent;
+    //         let fixed = self.avl_fix(idx);
+    //         if let Some(parent) = self.nodes[fixed].parent {
+    //             if self.nodes[parent].left == Some(idx) {
+    //                 self.nodes[parent].left = Some(fixed);
+    //             } else {
+    //                 self.nodes[parent].right = Some(fixed);
+    //             }
+    //         } else {
+    //             self.root = Some(fixed);
+    //         }
+    //         curr = par;
+    //     }
+    // }
+
     fn rebalance(&mut self, node: Option<usize>) {
-        let mut curr = node;
-        while let Some(idx) = curr {
-            let par = self.nodes[idx].parent;
-            let fixed = self.avl_fix(idx);
+        let mut curr = match node {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        loop {
+            let par = self.nodes[curr].parent;
+            let old_h = self.nodes[curr].height;
+            let fixed = self.avl_fix(curr);
+
+            // Update parent's child pointer if rotation changed the subtree root
             if let Some(parent) = self.nodes[fixed].parent {
-                if self.nodes[parent].left == Some(idx) {
+                if self.nodes[parent].left == Some(curr) {
                     self.nodes[parent].left = Some(fixed);
                 } else {
                     self.nodes[parent].right = Some(fixed);
@@ -264,7 +289,21 @@ impl Tree {
             } else {
                 self.root = Some(fixed);
             }
-            curr = par;
+
+            // No rotation + height unchanged
+            if fixed == curr && self.nodes[curr].height == old_h {
+                let mut p = par;
+                while let Some(pi) = p {
+                    self.update_node(pi);
+                    p = self.nodes[pi].parent;
+                }
+                return;
+            }
+
+            match par {
+                Some(p) => curr = p,
+                None => return,
+            }
         }
     }
 
@@ -789,8 +828,6 @@ impl Tree {
         let n = &self.nodes[new_idx];
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
-        // let target = *path.last().unwrap();
-        // let mut extended_path: Path = Path::from_slice(path);
         let last;
 
         if self.nodes[target].left.is_none() {

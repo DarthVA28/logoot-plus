@@ -8,6 +8,16 @@ pub const MAX_VALUE: u32 = 100000;
 pub const MAX_AGENTS: u32 = 1000;
 pub type Range = (u32, u32);
 
+#[inline(always)]
+pub fn encode_combined(priority: u32, replica: u32) -> u32 {
+    (priority << 16) | replica
+}
+
+#[inline(always)]
+pub fn decode_priority(combined: u32) -> u32 {
+    combined >> 16
+}
+
 const EMPTY_OFFSET: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
@@ -344,7 +354,7 @@ impl IdArena {
     //     let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
     //     next_at_l + 1 - insert_extra
     // }
-    
+
     pub fn num_insertable(
         &self,
         insert_base: Identifier, insert_seq: u32,
@@ -394,7 +404,6 @@ impl IdArena {
 
         count.min(length)
     }
-
 
     /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
     // pub fn find_split_point(
@@ -527,14 +536,8 @@ pub fn generate_base(
     high_base: Identifier, high_extra: u32,
     state: &mut State,
 ) -> Identifier {
-    // Reconstruct full positions: base ++ [seq]
     let low_slice = arena.get_slice(low_base);
     let high_slice = arena.get_slice(high_base);
-
-    // let mut low_full = SmallVec::from_slice(low_slice);
-    // low_full.push(low_extra);
-    // let mut high_full = SmallVec::from_slice(high_slice);
-    // high_full.push(high_extra);
 
     let mut low_full: Vec<u32> = Vec::with_capacity(low_slice.len() + 1);
     low_full.extend_from_slice(low_slice);
@@ -549,43 +552,29 @@ pub fn generate_base(
     let mut high_unconstrained = false;
 
     loop {
-        let l_p = low_full.get(depth * 3).copied().unwrap_or(MIN_VALUE);
-        let h_p = if high_unconstrained {
-            MAX_VALUE
+        let l_c = low_full.get(depth * 2).copied().unwrap_or(0);
+        let h_c = if high_unconstrained {
+            MAX_VALUE << 16
         } else {
-            high_full.get(depth * 3).copied().unwrap_or(MAX_VALUE)
+            high_full.get(depth * 2).copied().unwrap_or(MAX_VALUE << 16)
         };
 
-        // Paper constraint: last tuple priority > MIN_VALUE.
-        // Enforce by using (MIN_VALUE + 1) as the effective lower bound
-        // when low is exhausted (depth > 0).
-        let effective_l = if depth > 0 && low_full.get(depth * 3).is_none() {
-            MIN_VALUE  // will get +1 in the random range below
-        } else {
-            l_p
-        };
+        let l_p = decode_priority(l_c) + 1;
+        let h_p = decode_priority(h_c);
 
-        if (h_p as i64) - (effective_l as i64) >= 2 {
-            let chosen = state.rng.random_range(effective_l + 1..h_p);
-            new_path.push(chosen);
-            new_path.push(state.replica);
-            // seq = state.local_clock, applied as offset by the caller
+        if l_p < h_p {
+            let chosen = state.rng.random_range(l_p..h_p);
+            new_path.push(encode_combined(chosen, state.replica));
             return arena.intern(&new_path);
         }
 
-        // No gap in priority space — copy low's full tuple and descend
-        let l_r = low_full.get(depth * 3 + 1).copied().unwrap_or(0);
-        let l_s = low_full.get(depth * 3 + 2).copied().unwrap_or(MIN_VALUE);
-        new_path.push(l_p);
-        new_path.push(l_r);
+        let l_s = low_full.get(depth * 2 + 1).copied().unwrap_or(MIN_VALUE);
+        new_path.push(l_c);
         new_path.push(l_s);
 
-        // Once we've copied a tuple that is strictly less than high's tuple
-        // at the same depth, the high bound at all deeper depths is unconstrained.
         if !high_unconstrained {
-            let h_r = high_full.get(depth * 3 + 1).copied().unwrap_or(u32::MAX);
-            let h_s = high_full.get(depth * 3 + 2).copied().unwrap_or(u32::MAX);
-            if (l_p, l_r, l_s) < (h_p, h_r, h_s) {
+            let h_s = high_full.get(depth * 2 + 1).copied().unwrap_or(u32::MAX);
+            if (l_c, l_s) < (h_c, h_s) {
                 high_unconstrained = true;
             }
         }
