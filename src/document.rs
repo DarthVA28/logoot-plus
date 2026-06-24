@@ -68,8 +68,6 @@ impl Document {
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
-        self.dotstore.record_delta(&op);
-        self.state.local_clock += (to - from) as u32;
         self.fresh = false;
         op.to_wire(&self.id_arena)
     }
@@ -118,8 +116,8 @@ impl Document {
 
         // Some operations can now possibly be applied!
         if op.op_type == OperationType::Insert {
-            for (dot, _, _, _) in &op.ids {
-                let pending_ops = self.dotstore.get_pending_for_dot(dot);
+            for (dot, id, _, _) in &op.ids {
+                let pending_ops = self.dotstore.get_pending_for_id(id);
                 for op in pending_ops {
                     self.apply_op(&op);
                 }
@@ -154,6 +152,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
     let insert_base = doc.blocks.node_base_id(block);
     let insert_offsets = doc.blocks.node_ranges(block);
     let text_len = text.len() as u32;
+    let seq = doc.state.local_clock;
  
     if let Some(nxt_block) = next {
         let next_base = doc.blocks.node_base_id(nxt_block);
@@ -162,11 +161,11 @@ fn extend_block(doc: &mut Document, text: String, block: usize, path: &Path, sit
         if n < text_len {
             // Can't extend — not enough room before the next block.
             let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state);
-            let node = Node::new(text.clone(), base, 0, site);
+            let node = Node::new(text.clone(), base, seq, site);
             doc.blocks.insert_after(path, node);
             return Delta {
                 op_type: OperationType::Insert,
-                ids: vec![(Dot{ site, seq: doc.state.local_clock}, base, 0, text_len)],
+                ids: vec![(Dot{ site, seq: doc.state.local_clock}, base, seq, seq + text_len)],
                 payload: Some(text),
                 site,
             };
@@ -189,14 +188,15 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
  
     let (path, covered) = doc.blocks.find_by_pos(pos);
  
+    let seq = doc.state.local_clock;
     // ── Empty tree ──────────────────────────────────────────────────────
     if path.is_empty() {
         let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
-        let node = Node::new(text.clone(), base, 0, doc.state.replica);
+        let node = Node::new(text.clone(), base, seq, doc.state.replica);
         doc.blocks.insert_first(node);
         return Delta {
             op_type: OperationType::Insert,
-            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
+            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
         };
@@ -212,8 +212,9 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     if pos == block_end {
         // Try extending in-place first.
         if doc.blocks.node_creator(block) == doc.state.replica {
-            let base_ranges = doc.blocks.node_base_offsets(block);
-            if block_ranges.1 == base_ranges.1 {
+            // let base_ranges = doc.blocks.node_base_offsets(block);
+            // CHECK 
+            if block_ranges.1 == seq {
                 return extend_block(doc, text, block, &path, doc.state.replica);
             }
         }
@@ -230,14 +231,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             None => generate_base(&mut doc.id_arena, block_base, block_ranges.1 - 1, Identifier::EMPTY, MAX_VALUE, &mut doc.state)
         };
         // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
-        let node = Node::new(text.clone(), base, 0, doc.state.replica);
- 
-        // *** DIRECT: insert_after uses the path, no find_by_id ***
-        doc.blocks.insert_after(&path, node);
+        let node = Node::new(text.clone(), base, seq, doc.state.replica);
+         doc.blocks.insert_after(&path, node);
  
         return Delta {
             op_type: OperationType::Insert,
-            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
+            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
             // clock: doc.state.local_clock,
@@ -254,19 +253,13 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             }
             None => generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, block_base, block_ranges.0, &mut doc.state),
         };
-        // let id_high = IdentifierRef::new(block_base, block_ranges.0);
-        // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
-        let node = Node::new(text.clone(), base, 0, doc.state.replica);
- 
-        // *** DIRECT: insert_before uses the path, no find_by_id ***
+        let node = Node::new(text.clone(), base, seq, doc.state.replica);
         doc.blocks.insert_before(&path, node);
- 
         return Delta {
             op_type: OperationType::Insert,
-            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
+            ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
-            // clock: doc.state.local_clock,
         };
     }
  
@@ -280,16 +273,15 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     );
  
     let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state);
-    let middle = Node::new(text.clone(), base, 0, doc.state.replica);
+    let middle = Node::new(text.clone(), base, seq, doc.state.replica);
  
     doc.blocks.split_and_insert_middle(&path, sp as usize, middle);
  
     Delta {
         op_type: OperationType::Insert,
-        ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, 0, text_len)],
+        ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, seq, seq + text_len)],
         payload: Some(text),
         site: doc.state.replica,
-        // clock: doc.state.local_clock,
     }
 }
 
@@ -308,7 +300,6 @@ fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
     let mut num_delete = to - from;
     let mut del_info = vec![];
-    let mut seq: usize = 0;
     let curr = from;
  
     while num_delete > 0 {
@@ -323,34 +314,31 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
         let end_del    = start_del + num_delete;
         let base_id    = doc.blocks.node_base_id(block);
         let block_ranges = doc.blocks.node_ranges(block);
+        let creator = doc.blocks.node_creator(block);
  
         if start_del == 0 && end_del >= block_size {
             // ── Case 1: delete entire block ─────────────────────────────
-            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0, block_ranges.1));
+            del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0, block_ranges.1));
             num_delete -= block_size;
-            seq += block_size;
  
             // *** DIRECT: uses path, no find_by_id ***
             doc.blocks.delete_at_path(&path);
  
         } else if start_del == 0 {
             // ── Case 2: delete from start of block ──────────────────────
-            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0, block_ranges.0 + end_del as u32));
+            del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0, block_ranges.0 + end_del as u32));
             doc.blocks.truncate_content(block, num_delete, DelLocation::Start, &path);
-            seq += num_delete;
             num_delete = 0;
  
         } else if end_del >= block_size {
             let n = block_size - start_del;
-            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0 + start_del as u32, block_ranges.1));
+            del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0 + start_del as u32, block_ranges.1));
             doc.blocks.truncate_content(block, n, DelLocation::End, &path);
             num_delete -= n;
-            seq += n;
  
         } else {
-            del_info.push((Dot{ site: doc.state.replica, seq: doc.state.local_clock + seq as u32}, base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
+            del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
             doc.blocks.delete_middle_at_path(&path, start_del, num_delete);
-            seq += num_delete;
             num_delete = 0;
         }
     }

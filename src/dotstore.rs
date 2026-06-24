@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 
-use crate::{delta::{Delta, OperationType, WireDelta}};
+use crate::{delta::{Delta, WireDelta}};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Dot { 
@@ -13,7 +13,7 @@ pub struct DotStore {
     /* TODO: Compare Hashmap vs Ordered Tree */
     pub versions: HashMap<u32, u32>,
     pub missing: HashMap<u32, HashSet<u32>>,
-    pub pending: HashMap<Dot, WireDelta>,
+    pub pending: HashMap<Vec<u32>, Vec<WireDelta>>,
 }
 
 impl DotStore { 
@@ -25,9 +25,6 @@ impl DotStore {
         // Update versions and missing for each dot in the delta
         // Note: The dot for each operation is the dot for the *first* ID in the operation. 
         // We need to increment by # of ids in the operation
-        if op.op_type != OperationType::Insert {
-            return;
-        }
         for (dot, _id, lo, hi) in &op.ids {
             let site_version = self.versions.entry(dot.site).or_insert(0);
             if dot.seq > *site_version + 1 {
@@ -55,18 +52,28 @@ impl DotStore {
         false
     }
 
-    pub fn get_pending_for_dot(&self, dot: &Dot) -> Vec<WireDelta> {
-        self.pending.iter()
-            .filter(|(pending_dot, _)| pending_dot.site == dot.site && pending_dot.seq == dot.seq)
-            .map(|(_, op)| op.clone())
-            .collect()
+    pub fn add_to_pending(&mut self, op: WireDelta) {
+        // println!("Adding op {:?} to pending at site {}", op, op.site);
+        let id = op.ids.first().unwrap().1.clone();
+        self.pending.entry(id).or_default().push(op);   
     }
 
-    pub fn add_to_pending(&mut self, op: WireDelta) {
-        for (dot, _id, _lo, _hi) in &op.ids {
-            self.pending.insert(dot.clone(), op.clone());
-        }
+    pub fn get_pending_for_id(&mut self, id: &[u32]) -> Vec<WireDelta> {
+        self.pending.remove(id).unwrap_or_default()
     }
+
+    // pub fn get_pending_for_dot(&self, dot: &Dot) -> Vec<WireDelta> {
+    //     self.pending.iter()
+    //         .filter(|(pending_dot, _)| pending_dot.site == dot.site && pending_dot.seq == dot.seq)
+    //         .map(|(_, op)| op.clone())
+    //         .collect()
+    // }
+
+    // pub fn add_to_pending(&mut self, op: WireDelta) {
+    //     for (dot, _id, _lo, _hi) in &op.ids {
+    //         self.pending.insert(dot.clone(), op.clone());
+    //     }
+    // }
 
     pub fn clear(&mut self) {
         self.versions.clear();
