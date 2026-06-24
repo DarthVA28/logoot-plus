@@ -4,6 +4,7 @@ use crate::tree::{DelLocation, Tree};
 use crate::state::State;
 use crate::delta::{Delta, OperationType, WireDelta};
 use crate::dotstore::{DotStore, Dot};
+use crate::dotindex::DotIndex;
 
 #[derive(Clone, Debug)]
 pub struct Document { 
@@ -11,6 +12,7 @@ pub struct Document {
     pub id_arena: IdArena,
     state: State,
     snapshot: String,
+    pub dot_index: DotIndex,
     pub dotstore: DotStore,
     debug: bool,
     fresh: bool,
@@ -23,6 +25,7 @@ impl Document {
             id_arena: IdArena::new(),
             state: State::new(id),
             snapshot: String::new(),
+            dot_index: DotIndex::new(),
             dotstore: DotStore::new(),
             debug: false,
             fresh: true,
@@ -165,7 +168,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
             // Can't extend — not enough room before the next block.
             let base = generate_base(&mut doc.id_arena, insert_base, insert_offsets.1-1, next_base, next_offsets.0, &mut doc.state);
             let node = Node::new(text.clone(), base, seq, site);
-            doc.blocks.insert_after(block, node);
+            doc.blocks.insert_after(&mut doc.dot_index, block, node);
             return Delta {
                 op_type: OperationType::Insert,
                 ids: vec![(Dot{ site, seq: doc.state.local_clock}, base, seq, seq + text_len)],
@@ -175,7 +178,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
         }
     }
  
-    doc.blocks.extend_content(block, &text);
+    doc.blocks.extend_content(&mut doc.dot_index, block, &text);
     Delta {
         op_type: OperationType::Insert,
         ids: vec![(Dot{ site, seq: doc.state.local_clock}, insert_base, insert_offsets.1, insert_offsets.1 + text_len)],
@@ -196,7 +199,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     if node.is_none() {
         let base = generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, Identifier::EMPTY, MAX_VALUE, &mut doc.state);
         let node = Node::new(text.clone(), base, seq, doc.state.replica);
-        doc.blocks.insert_first(node);
+        doc.blocks.insert_first(&mut doc.dot_index, node);
         return Delta {
             op_type: OperationType::Insert,
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, seq, seq + text_len)],
@@ -235,7 +238,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         };
         // let base = generate_base(&mut doc.id_arena, id_low, id_high, &mut doc.state);
         let node = Node::new(text.clone(), base, seq, doc.state.replica);
-        doc.blocks.insert_after(block, node);
+        doc.blocks.insert_after(&mut doc.dot_index, block, node);
  
         return Delta {
             op_type: OperationType::Insert,
@@ -257,7 +260,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             None => generate_base(&mut doc.id_arena, Identifier::EMPTY, MIN_VALUE, block_base, block_ranges.0, &mut doc.state),
         };
         let node = Node::new(text.clone(), base, seq, doc.state.replica);
-        doc.blocks.insert_before(block, node);
+        doc.blocks.insert_before(&mut doc.dot_index, block, node);
         return Delta {
             op_type: OperationType::Insert,
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock }, base, seq, seq + text_len)],
@@ -278,7 +281,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state);
     let middle = Node::new(text.clone(), base, seq, doc.state.replica);
  
-    doc.blocks.split_and_insert_middle(block, sp as usize, middle);
+    doc.blocks.split_and_insert_middle(&mut doc.dot_index, block, sp as usize, middle);
  
     Delta {
         op_type: OperationType::Insert,
@@ -297,7 +300,7 @@ fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
     let site = op.site;
 
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &mut doc.id_arena, &base, offset, text.to_string())
+    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, &base, offset, text.to_string())
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
@@ -325,23 +328,23 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
             num_delete -= block_size;
  
             // *** DIRECT: uses path, no find_by_id ***
-            doc.blocks.delete_target(Some(block));
+            doc.blocks.delete_target(&mut doc.dot_index, Some(block));
  
         } else if start_del == 0 {
             // ── Case 2: delete from start of block ──────────────────────
             del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0, block_ranges.0 + end_del as u32));
-            doc.blocks.truncate_content(block, num_delete, DelLocation::Start);
+            doc.blocks.truncate_content(&mut doc.dot_index, block, num_delete, DelLocation::Start);
             num_delete = 0;
  
         } else if end_del >= block_size {
             let n = block_size - start_del;
             del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0 + start_del as u32, block_ranges.1));
-            doc.blocks.truncate_content(block, n, DelLocation::End);
+            doc.blocks.truncate_content(&mut doc.dot_index, block, n, DelLocation::End);
             num_delete -= n;
  
         } else {
             del_info.push((Dot{ site: creator, seq: block_ranges.0}, base_id, block_ranges.0 + start_del as u32, block_ranges.0 + end_del as u32));
-            doc.blocks.delete_middle_at_target(block, start_del, num_delete);
+            doc.blocks.delete_middle_at_target(&mut doc.dot_index, block, start_del, num_delete);
             num_delete = 0;
         }
     }
@@ -363,7 +366,8 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
         let mut processed = 0;
         while processed < offsets_len {
             // FIXME: place of inefficiency
-            let node = doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed);
+            let node = doc.dot_index.lookup(dot.site, start + processed);
+            // let node = doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed);
             if node.is_none() {
                 // base id exists but this offset is missing 
                 let missing_start = start + processed;
@@ -401,14 +405,14 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
             // Same 4 cases as local delete
             if offset == block_ranges.0 && n_in_block >= block_size {
                 // Case 1: delete the entire block 
-                doc.blocks.delete_target(Some(block));
+                doc.blocks.delete_target(&mut doc.dot_index, Some(block));
             } else if offset == block_ranges.0 {
-                doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::Start);
+                doc.blocks.truncate_content(&mut doc.dot_index, block, n_in_block as usize, DelLocation::Start);
             } else if offset + n_in_block as u32 >= block_ranges.1 {
-                doc.blocks.truncate_content(block, n_in_block as usize, DelLocation::End);
+                doc.blocks.truncate_content(&mut doc.dot_index, block, n_in_block as usize, DelLocation::End);
             } else {
                 let sp = (offset - block_ranges.0) as usize;
-                doc.blocks.delete_middle_at_target(block, sp, n_in_block as usize);             
+                doc.blocks.delete_middle_at_target(&mut doc.dot_index, block, sp, n_in_block as usize);             
             }
             processed += n_in_block;
         }

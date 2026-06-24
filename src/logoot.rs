@@ -8,6 +8,7 @@ pub mod network;
 pub mod trace_bench;
 pub mod idarena;
 pub mod dotstore;
+pub mod dotindex;
 
 use document::Document;
 use network::Network;
@@ -174,7 +175,7 @@ fn run_insert_delete(seed: u64) {
 #[test]
 fn test_insert_delete_heavy() {
     for i in 0..100000 {
-        println!("Running seed {}", i);
+        // println!("Running seed {}", i);
         run_insert_delete(i);
     }
 }
