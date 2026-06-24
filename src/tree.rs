@@ -122,8 +122,8 @@ impl Tree {
         self.nodes[node].base_id = new_base;
     }
 
-    pub fn extend_content(&mut self, node: usize, text: &str, path_to_root: &[usize]) {
-        let node = &mut self.nodes[node];
+    pub fn extend_content(&mut self, node_idx: usize, text: &str) {
+        let node = &mut self.nodes[node_idx];
         node.content.push_str(text);
         let added_size = text.chars().count();
         node.size += added_size;
@@ -133,13 +133,16 @@ impl Tree {
             let new_hi = hi + added_size as u32;
             self.base_to_offsets.insert(base_id, (*lo, new_hi));
         } 
-        for idx in path_to_root.iter().rev() {
-            self.update_node(*idx);
+        // update everything till root 
+        let mut curr = Some(node_idx);
+        while let Some(idx) = curr {
+            self.update_node(idx);
+            curr = self.nodes[idx].parent;
         }
     }
 
-    pub fn truncate_content(&mut self, node: usize, num_delete: usize, location: DelLocation, path_to_root: &[usize]) {
-        let n = &mut self.nodes[node];
+    pub fn truncate_content(&mut self, node_idx: usize, num_delete: usize, location: DelLocation) {
+        let n = &mut self.nodes[node_idx];
         match location {
             DelLocation::Start => {
                 let byte_off = n.content.char_indices()
@@ -160,8 +163,10 @@ impl Tree {
             }
         }
         n.size -= num_delete;
-        for idx in path_to_root.iter().rev() {
-            self.update_node(*idx);
+        let mut curr = Some(node_idx);
+        while let Some(idx) = curr {
+            self.update_node(idx);
+            curr = self.nodes[idx].parent;
         }
     }
 
@@ -245,158 +250,87 @@ impl Tree {
         }
     }
 
-    /* Rebalance the tree all along a path to root */
-    fn rebalance_old(&mut self, path_to_root: &[usize]) {
-        if path_to_root.is_empty() { return; }
-
-        // The deepest node in the path 
-        let mut curr = *path_to_root.last().unwrap(); 
-        let path_len = path_to_root.len();
-
-        for i in (0..path_to_root.len()).rev() {
-            let idx = path_to_root[i];
-            let node = &self.nodes[idx];
-
-            // Update its children 
-            if i+1 < path_len { 
-                let old_child = path_to_root[i+1];
-                if node.left == Some(old_child) {
-                    self.nodes[idx].left = Some(curr);
-                } else { 
-                    self.nodes[idx].right = Some(curr);
+    fn rebalance(&mut self, node: Option<usize>) {
+        let mut curr = node;
+        while let Some(idx) = curr {
+            let par = self.nodes[idx].parent;
+            let fixed = self.avl_fix(idx);
+            if let Some(parent) = self.nodes[fixed].parent {
+                if self.nodes[parent].left == Some(idx) {
+                    self.nodes[parent].left = Some(fixed);
+                } else {
+                    self.nodes[parent].right = Some(fixed);
                 }
+            } else {
+                self.root = Some(fixed);
             }
-
-            let old_h = self.nodes[idx].height;
-            curr = self.avl_fix(idx);
-            if curr == idx && self.nodes[idx].height == old_h {
-                for j in (0..i).rev() {
-                    self.update_node(path_to_root[j]);
-                }
-                if i > 0 { 
-                    self.root = Some(path_to_root[0]); 
-                }
-                else { 
-                    self.root = Some(curr); 
-                }
-            return;
+            curr = par;
         }
-
-        }
-        self.root = Some(curr);
     }
-
-    // fn rebalance(&mut self, node: Option<usize>) {
-    //     if let Some(curr) = node {
-    //         let mut idx = Some(curr);
-    //         while !idx.is_none() {
-    //             let node = &self.nodes[idx.unwrap()];
-                
-
-    //         }
-
-    //     } else {
-    //         return;
-    //     }
-
-    //     // The deepest node in the path 
-    //     let mut curr = *path_to_root.last().unwrap(); 
-    //     let path_len = path_to_root.len();
-
-    //     for i in (0..path_to_root.len()).rev() {
-    //         let idx = path_to_root[i];
-    //         let node = &self.nodes[idx];
-
-    //         // Update its children 
-    //         if i+1 < path_len { 
-    //             let old_child = path_to_root[i+1];
-    //             if node.left == Some(old_child) {
-    //                 self.nodes[idx].left = Some(curr);
-    //             } else { 
-    //                 self.nodes[idx].right = Some(curr);
-    //             }
-    //         }
-
-    //         let old_h = self.nodes[idx].height;
-    //         curr = self.avl_fix(idx);
-    //         if curr == idx && self.nodes[idx].height == old_h {
-    //             for j in (0..i).rev() {
-    //                 self.update_node(path_to_root[j]);
-    //             }
-    //             if i > 0 { 
-    //                 self.root = Some(path_to_root[0]); 
-    //             }
-    //             else { 
-    //                 self.root = Some(curr); 
-    //             }
-    //         return;
-    //     }
-
-    //     }
-    //     self.root = Some(curr);
-    // }
 
 }
 
 /* Inorder Predecessor and Successor Functions */
 impl Tree {
     // Function to get inorder successor of a node
-    pub fn next(&self, node: usize, path: &[usize]) -> Option<usize> {
+    pub fn next(&self, node: usize) -> Option<usize> {
         let nodes = &self.nodes;
-        let curr = node;
 
         // Case 1: right subtree: leftmost node
-        if let Some(mut r) = nodes[curr].right {
+        if let Some(mut r) = nodes[node].right {
             while let Some(l) = nodes[r].left {
                 r = l;
             }
             return Some(r);
         }
 
-        // Case 2: go up until we come from left
-        for i in (1..path.len()).rev() {
-            let parent = path[i - 1];
-            if nodes[parent].left == Some(path[i]) {
+        // Case 2: go up until we come from the left
+        let mut curr = node;
+        while let Some(parent) = nodes[curr].parent {
+            if nodes[parent].left == Some(curr) {
                 return Some(parent);
             }
+            curr = parent; // Move up the tree
         }
+        
         None
     }
 
     // Function to get inorder predecessor of a node
-    pub fn prev(&self, node: usize, path: &[usize]) -> Option<usize> {
+    pub fn prev(&self, node: usize) -> Option<usize> {
         let nodes = &self.nodes;
-        let curr = node;
 
         // Case 1: left subtree: rightmost node
-        if let Some(mut l) = nodes[curr].left {
+        if let Some(mut l) = nodes[node].left {
             while let Some(r) = nodes[l].right {
                 l = r;
             }
             return Some(l);
         }
 
-        // Case 2: go up until we come from right
-        for i in (1..path.len()).rev() {
-            let parent = path[i - 1];
-            if nodes[parent].right == Some(path[i]) {
+        // Case 2: go up until we come from the right
+        let mut curr = node;
+        while let Some(parent) = nodes[curr].parent {
+            if nodes[parent].right == Some(curr) {
                 return Some(parent);
             }
+            curr = parent; // Move up the tree
         }
+        
         None
     }
 }
 
 impl Tree {
-    pub fn find_by_pos(&self, pos: usize) -> (Path, usize) {
-        let mut path_to_root = Path::new(); 
+    pub fn find_by_pos(&self, pos: usize) -> (Option<usize>, usize) {
+        // let mut path_to_root = Path::new(); 
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
         let mut covered: usize = 0;
         while let Some(index) = i { 
             let node = &nodes[index];
-            path_to_root.push(index);
+            // path_to_root.push(index);
             let left = node.left;
             let left_count = if let Some(left_index) = left {
                 nodes[left_index].subtree_count
@@ -407,25 +341,27 @@ impl Tree {
                 i = left;
             } else if curr <= left_count + node.size {
                 covered += left_count;
-                return (path_to_root, covered);
+                return (Some(index), covered);
             } else { 
                 curr -= left_count + node.size;
                 covered += left_count + node.size;
                 i = node.right;
             }
         }
-        (path_to_root, covered)
+        (None, covered)
     }
 
-    pub fn find_by_pos_delete(&self, pos: usize) -> (Path, usize) {
-        let mut path_to_root = Path::new();
+    pub fn find_by_pos_delete(&self, pos: usize) -> (Option<usize>, usize) {
+        // let mut path_to_root = Path::new();
         let nodes = &self.nodes;
         let mut i = self.root;
         let mut curr = pos;
         let mut covered: usize = 0;
+        let mut last = None;
         while let Some(index) = i {
+            last = Some(index);
             let node = &nodes[index];
-            path_to_root.push(index);
+            // path_to_root.push(index);
             let left = node.left;
             let left_count = if let Some(left_index) = left {
                 nodes[left_index].subtree_count
@@ -440,14 +376,14 @@ impl Tree {
                 // valid deletion position at the right edge of the node
                 // (that would be the first character of the right subtree).
                 covered += left_count;
-                return (path_to_root, covered);
+                return (Some(index), covered);
             } else {
                 curr -= left_count + node.size;
                 covered += left_count + node.size;
                 i = node.right;
             }
         }
-        (path_to_root, covered)
+        (last, covered)
     }
 
     /// Insert the node by identifier  
@@ -474,14 +410,14 @@ impl Tree {
     }
 
     pub fn insert_rec(&mut self, id_arena: &mut IdArena, node: usize, node_base: &[u32], node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) -> Identifier {
-        let mut path = Path::new();
+        // let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
         let mut inserted_id = Identifier::EMPTY;
+        let mut last = None;
 
         while con {
-            path.push(from);
-
+            last = Some(from);
             let relation = {
                 let n = &self.nodes[from];
                 id_arena.compare_intervals_first_raw(node_base, node_lo, node_hi, n.base_id, n.offset, n.offset + n.size as u32)
@@ -608,6 +544,7 @@ impl Tree {
                             } else {
                                 from_node.right = Some(node);
                                 self.nodes[node].parent = Some(from);
+                                self.node_set_base_id(node, node_base_id);
                                 break;
                             }
                         }
@@ -620,10 +557,11 @@ impl Tree {
                         } else {
                             from_node.right = Some(node);
                             self.nodes[node].parent = Some(from);
+                            self.node_set_base_id(node, node_base_id);
                             break;
                         }
                     }
-                    let nxt = self.next(from, &path);
+                    let nxt = self.next(from);
                     if let Some(r) = nxt {
                         let r_base = self.node_base_id(r);
                         let r_offset = self.node_ranges(r).0;
@@ -707,35 +645,13 @@ impl Tree {
             }
         }
         if !rec {
-            self.rebalance_old(&path);
+            self.rebalance(last);
         }
         return inserted_id;
 
     }
 
-    // pub fn splice(&mut self, path: &[usize], target: usize, replacement: Option<usize>) {
-    //     if path.len() == 1 {
-    //         // Target is root 
-    //         self.root = replacement;
-    //         self.free(target);
-    //         return;
-    //     }
-
-    //     let parent_idx = path[path.len() - 2];
-    //     let parent = &mut self.nodes[parent_idx];
-    //     if parent.left == Some(target) {
-    //         parent.left = replacement;
-    //     } else if parent.right == Some(target) {
-    //         parent.right = replacement;
-    //     } else { 
-    //         panic!("splice: invalid path, target not a child of its parent");
-    //     }
-
-    //     self.free(target);
-    //     self.rebalance_old(&path[..path.len()-1]);
-    // }
-
-    pub fn splice(&mut self, path: &[usize], target: usize, replacement: Option<usize>) {
+    pub fn splice(&mut self, target: usize, replacement: Option<usize>) {
         let target_node = &self.nodes[target];
         // let parent_idx = target_node.parent;
 
@@ -755,7 +671,7 @@ impl Tree {
             }
 
             self.free(target);
-            self.rebalance_old(&path[..path.len()-1]);
+            self.rebalance(Some(parent_idx));
         } else {
             // Target is the root 
             self.root = replacement;
@@ -768,15 +684,14 @@ impl Tree {
         
     }
 
-    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: &[u32], offset: u32) -> Path {
-        let mut path = Path::new();
+    pub fn find_by_id_exact(&mut self, id_arena: &IdArena, base: &[u32], offset: u32) -> Option<usize> {
         if self.is_empty() {
-            return Path::new();
+            return None;
         }
         let mut curr = self.root.unwrap();
 
         loop {
-            path.push(curr);
+            // path.push(curr);
             let cmp = {
                 let b1_base = base;
                 let b1_lo = offset;
@@ -793,14 +708,16 @@ impl Tree {
                     if let Some(r) = self.nodes[curr].right {
                         curr = r;
                     } else {
-                        return Path::new();
+                        // return Path::new();
+                        return None;
                     }
                 }
                 IdOrderingRelation::B1BeforeB2 | IdOrderingRelation::B1ConcatB2 => {
                     if let Some(l) = self.nodes[curr].left {
                         curr = l;
                     } else {
-                        return Path::new();
+                        // return Path::new();
+                        return None;
                     }
                 }
                 IdOrderingRelation::B1EqualsB2 => {
@@ -808,9 +725,9 @@ impl Tree {
                     // println!("Probe matches node range exactly, checking base for exact match");
                     let curr_slice = id_arena.get_slice_unchecked(self.nodes[curr].base_id);
                     if curr_slice == base {
-                        return path;
+                        return Some(curr);
                     }
-                    return Path::new();
+                    return None;
                     // return path;
                 }
                 IdOrderingRelation::B1InsideB2 => {
@@ -820,9 +737,9 @@ impl Tree {
                     // Cannot exist elsewhere in the tree, so return empty if base differs.
                     let curr_slice = id_arena.get_slice_unchecked(self.nodes[curr].base_id);
                     if curr_slice == base {
-                        return path;
+                        return Some(curr);
                     }
-                    return Path::new();
+                    return None;
                 }
                 _ => panic!("Unexpected relation in find_by_id_exact"),
             }
@@ -841,68 +758,68 @@ impl Tree {
             self.base_to_offsets.insert(base, (offset, offset + size));
         }
     }
-    pub fn insert_after(&mut self, path: &[usize], node: Node) -> usize {
+    pub fn insert_after(&mut self, target: usize, node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
-        let target = *path.last().unwrap();
-        let mut extended_path: Path = Path::from_slice(path);
+        let last;
 
         if self.nodes[target].right.is_none() {
             self.nodes[target].right = Some(new_idx);
             self.nodes[new_idx].parent = Some(target);
+            last = Some(target);
         } else {
             // Walk to the leftmost node in the right subtree.
             let mut curr = self.nodes[target].right.unwrap();
-            extended_path.push(curr);
             while let Some(l) = self.nodes[curr].left {
                 curr = l;
-                extended_path.push(curr);
             }
             self.nodes[curr].left = Some(new_idx);
             self.nodes[new_idx].parent = Some(curr);
+            last = Some(curr);
         }
 
-        self.rebalance_old(&extended_path);
+        self.rebalance(last);
         new_idx
     }
 
-    pub fn insert_before(&mut self, path: &[usize], node: Node) -> usize {
+    pub fn insert_before(&mut self, target: usize, node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
-        let target = *path.last().unwrap();
-        let mut extended_path: Path = Path::from_slice(path);
+        // let target = *path.last().unwrap();
+        // let mut extended_path: Path = Path::from_slice(path);
+        let last;
 
         if self.nodes[target].left.is_none() {
             self.nodes[target].left = Some(new_idx);
             self.nodes[new_idx].parent = Some(target);
+            last = Some(target);
         } else {
             // Walk to the rightmost node in the left subtree.
             let mut curr = self.nodes[target].left.unwrap();
-            extended_path.push(curr);
+            // extended_path.push(curr);
             while let Some(r) = self.nodes[curr].right {
                 curr = r;
-                extended_path.push(curr);
+                // extended_path.push(curr);
             }
             self.nodes[curr].right = Some(new_idx);
             self.nodes[new_idx].parent = Some(curr);
+            last = Some(curr);
         }
 
-        self.rebalance_old(&extended_path);
+        self.rebalance(last);
         new_idx
     }
 
     pub fn split_and_insert_middle(
         &mut self,
-        path: &[usize],
+        target: usize,
         sp: usize,         
         middle: Node,
     ) -> usize {
-        let target = *path.last().unwrap();
-
         let base_id = self.nodes[target].base_id;
         let offset  = self.nodes[target].offset;
         let creator = self.nodes[target].creator;
@@ -934,36 +851,34 @@ impl Tree {
         self.nodes[target].right = Some(joined);
         self.nodes[joined].parent = Some(target);
 
-        self.rebalance_old(path);  // path ends at target, NOT at right_idx
+        self.rebalance(Some(target));  // path ends at target, NOT at right_idx
         middle_idx
     }
 
     /// Delete the node at `path.last()` using the path directly.
     /// This is the same algorithm as delete_by_id's second half, but skips
     /// the find_by_id traversal since we already have the path.
-    pub fn delete_at_path(&mut self, path: &[usize]) {
-        if path.is_empty() {
+    pub fn delete_target(&mut self, target: Option<usize>) {
+        if target.is_none() {
             return;
         }
-        let curr = *path.last().unwrap();
+        let curr = target.unwrap();
         let left  = self.nodes[curr].left;
         let right = self.nodes[curr].right;
 
         match (left, right) {
             (None, None) => {
-                self.splice(path, curr, None);
+                self.splice(curr, None);
             }
             (Some(child), None) | (None, Some(child)) => {
-                self.splice(path, curr, Some(child));
+                self.splice(curr, Some(child));
             }
             (Some(_), Some(r)) => {
                 // Two children: replace with in-order successor, then delete successor.
-                let mut succ_path: Path = Path::from_slice(path);
-                succ_path.push(r);
+                // let mut succ_path: Path = Path::from_slice(path);
                 let mut succ = r;
                 while let Some(l) = self.nodes[succ].left {
                     succ = l;
-                    succ_path.push(succ);
                 }
 
                 // Copy successor's payload into target.
@@ -983,18 +898,17 @@ impl Tree {
 
                 // Delete successor 
                 let succ_right = self.nodes[succ].right;
-                self.splice(&succ_path, succ, succ_right);
+                self.splice(succ, succ_right);
             }
         }
     }
 
-    pub fn delete_middle_at_path(
+    pub fn delete_middle_at_target(
         &mut self,
-        path: &[usize],
+        target: usize,
         start: usize,
         count: usize,
     ) {
-        let target = *path.last().unwrap();
         let base_id = self.nodes[target].base_id;
         let offset  = self.nodes[target].offset;
         let creator = self.nodes[target].creator;
@@ -1028,7 +942,7 @@ impl Tree {
         self.nodes[target].right = Some(joined);
         self.nodes[joined].parent = Some(target);
 
-        self.rebalance_old(path);
+        self.rebalance(Some(target));
     }
 
     pub fn insert_first(&mut self, node: Node) -> usize {

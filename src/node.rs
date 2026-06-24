@@ -6,13 +6,13 @@ pub struct Node {
     pub left: Option<usize>, 
     pub right: Option<usize>,
     pub parent: Option<usize>,
-    pub content: String,
     pub height: i32,
     pub size: usize,
     pub subtree_count: usize, // subtree count is the number of chars in the subtree rooted at this node
     pub creator: u32, // replica id of the creator
     pub base_id: Identifier,
     pub offset: u32, // starting offset 
+    pub content: String,
 }
 
 impl Node {
