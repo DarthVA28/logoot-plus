@@ -60,7 +60,10 @@ impl DotIndex {
         let mut cursor = self.ranges.upper_bound_mut(Bound::Included(&(creator, old_lo)));
         let (_, (hi, node_idx)) = cursor.remove_prev()
             .expect("trunc_start: not found");
-        cursor.insert_before((creator, new_lo), (hi, node_idx));
+        let res = cursor.insert_before((creator, new_lo), (hi, node_idx));
+        if res.is_err() {
+            panic!("trunc_start: insert_before failed");
+        }
     }
 
     pub fn on_block_truncated_end(&mut self, creator: u32, seq_lo: u32, new_hi: u32) {
