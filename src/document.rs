@@ -147,6 +147,7 @@ impl Document {
         self.id_arena.clear();
         self.snapshot.clear();
         self.dotstore.clear();
+        self.dot_index.clear();
         self.state.local_clock = 1;
         self.fresh = true;
     }
@@ -373,7 +374,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                 let missing_start = start + processed;
                 processed += 1;
                 while processed < offsets_len {
-                    if doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed).is_none() {
+                    if doc.dot_index.lookup(dot.site, start + processed).is_none() {
                         processed += 1;
                     } else {
                         break;

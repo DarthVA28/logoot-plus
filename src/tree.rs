@@ -144,36 +144,48 @@ impl Tree {
     }
 
     pub fn truncate_content(&mut self, dot_index: &mut DotIndex, node_idx: usize, num_delete: usize, location: DelLocation) {
-        let n = &mut self.nodes[node_idx];
-        match location {
-            DelLocation::Start => {
-                let byte_off = n.content.char_indices()
-                    .nth(num_delete)
-                    .map(|(i, _)| i)
-                    .unwrap_or(n.content.len());
-                let kept = n.content.split_off(byte_off);
-                dot_index.on_block_truncated_start(n.creator, n.offset, n.offset + num_delete as u32);
-                n.content = kept;
-                n.offset += num_delete as u32;
+        let creator = self.nodes[node_idx].creator;
+        let old_offset = self.nodes[node_idx].offset;
+        let is_start = matches!(&location, DelLocation::Start);
+
+        {
+            let n = &mut self.nodes[node_idx];
+            match location {
+                DelLocation::Start => {
+                    let byte_off = n.content.char_indices()
+                        .nth(num_delete)
+                        .map(|(i, _)| i)
+                        .unwrap_or(n.content.len());
+                    let kept = n.content.split_off(byte_off);
+                    n.content = kept;
+                    n.offset += num_delete as u32;
+                }
+                DelLocation::End => {
+                    let keep_chars = n.size - num_delete;
+                    let byte_off = n.content.char_indices()
+                        .nth(keep_chars)
+                        .map(|(i, _)| i)
+                        .unwrap_or(n.content.len());
+                    n.content.truncate(byte_off);
+                }
             }
-            DelLocation::End => {
-                let keep_chars = n.size - num_delete;
-                let byte_off = n.content.char_indices()
-                    .nth(keep_chars)
-                    .map(|(i, _)| i)
-                    .unwrap_or(n.content.len());
-                n.content.truncate(byte_off); // truncate in-place, no allocation
-                dot_index.on_block_truncated_end(n.creator, n.offset, n.offset + n.size as u32);
-            }
+            n.size -= num_delete;
         }
-        n.size -= num_delete;
+        // n borrow is dead — safe to access self.nodes and dot_index
+
+        if is_start {
+            dot_index.on_block_truncated_start(creator, old_offset, old_offset + num_delete as u32);
+        } else {
+            let new_hi = self.nodes[node_idx].offset + self.nodes[node_idx].size as u32;
+            dot_index.on_block_truncated_end(creator, old_offset, new_hi);
+        }
+
         let mut curr = Some(node_idx);
         while let Some(idx) = curr {
             self.update_node(idx);
             curr = self.nodes[idx].parent;
         }
     }
-
 }
 
 /* Rotation and Rebalancing Functions */
