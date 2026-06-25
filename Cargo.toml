@@ -16,6 +16,7 @@ serde_json = "1.0.96"
 ahash = "0.8"
 dhat = { version = "0.3", optional = true }
 smallvec = { version = "1", features = ["union"] }
+btree_experiment = "0.1"
 
 [features]
 default = []
