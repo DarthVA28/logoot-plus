@@ -125,7 +125,7 @@ impl Tree {
     pub fn extend_content(&mut self, node_idx: usize, text: &str) {
         let node = &mut self.nodes[node_idx];
         node.content.push_str(text);
-        let added_size = text.chars().count();
+        let added_size = text.len();
         node.size += added_size;
         // update the offsets of the base 
         let base_id = node.base_id;
@@ -428,7 +428,7 @@ impl Tree {
     /// Insert the node by identifier  
     /// Return the interned identifier
     pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, base: &[u32], offset: u32, content: String) -> Identifier {
-        let len = content.chars().count() as u32;
+        let len = content.len() as u32;
         let idx = self.alloca(Node::new(content, Identifier::EMPTY, offset, site));
         if self.is_empty() {
             let base_id = id_arena.intern(base);
@@ -550,7 +550,7 @@ impl Tree {
 
                     let from_node = &mut self.nodes[from];
                     from_node.content = from_content;
-                    from_node.size = from_node.content.chars().count();
+                    from_node.size = from_node.content.len();
 
                     // Intern identifier for the new node
                     if inserted_id == Identifier::EMPTY {
@@ -623,7 +623,7 @@ impl Tree {
                         let content = std::mem::take(&mut self.nodes[node].content);
                         let from_node = &mut self.nodes[from];
                         from_node.content.push_str(&content);
-                        from_node.size = from_node.content.chars().count();
+                        from_node.size = from_node.content.len();
                         self.free(node);
                         con = false;
                     }
