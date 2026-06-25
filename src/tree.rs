@@ -171,7 +171,6 @@ impl Tree {
             }
             n.size -= num_delete;
         }
-        // n borrow is dead — safe to access self.nodes and dot_index
 
         if is_start {
             dot_index.on_block_truncated_start(creator, old_offset, old_offset + num_delete as u32);
