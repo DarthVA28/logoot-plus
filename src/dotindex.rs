@@ -168,20 +168,31 @@ impl DotMap for BTreeDotMap {
         self.ranges.remove(&seq_lo)
     }
 
+    // fn split(&mut self, seq_lo: u32, split_seq: u32, new_node_idx: usize) {
+    //     let (old_hi, old_node) = self
+    //         .ranges
+    //         .remove(&seq_lo)
+    //         .expect("split: no range at seq_lo");
+    //     debug_assert!(
+    //         split_seq > seq_lo && split_seq < old_hi,
+    //         "split: split_seq {} outside [{}, {})",
+    //         split_seq,
+    //         seq_lo,
+    //         old_hi
+    //     );
+    //     self.ranges.insert(seq_lo, (split_seq, old_node));
+    //     self.ranges.insert(split_seq, (old_hi, new_node_idx));
+    // }
     fn split(&mut self, seq_lo: u32, split_seq: u32, new_node_idx: usize) {
-        let (old_hi, old_node) = self
-            .ranges
-            .remove(&seq_lo)
+        let entry = self.ranges.get_mut(&seq_lo)                            // 1 get_mut (in-place)
             .expect("split: no range at seq_lo");
+        let old_hi = entry.0;
         debug_assert!(
             split_seq > seq_lo && split_seq < old_hi,
-            "split: split_seq {} outside [{}, {})",
-            split_seq,
-            seq_lo,
-            old_hi
+            "split: split_seq {} outside [{}, {})", split_seq, seq_lo, old_hi
         );
-        self.ranges.insert(seq_lo, (split_seq, old_node));
-        self.ranges.insert(split_seq, (old_hi, new_node_idx));
+        entry.0 = split_seq;                                                
+        self.ranges.insert(split_seq, (old_hi, new_node_idx));              
     }
 
     fn truncate_start(&mut self, old_lo: u32, new_lo: u32) {
