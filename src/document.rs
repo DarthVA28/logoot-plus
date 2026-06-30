@@ -1,5 +1,3 @@
-use rand::rand_core::block;
-
 use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, generate_base};
 use crate::node::Node;
 use crate::tree::{DelLocation, Tree};
@@ -118,8 +116,8 @@ impl Document {
 
         // Some operations can now possibly be applied!
         if op.op_type == OperationType::Insert {
-            for (_dot, id, _, _) in &op.ids {
-                let pending_ops = self.dotstore.get_pending_for_block(_dot.site, _dot.b_idx);
+            for (dot, _, _, _) in &op.ids {
+                let pending_ops = self.dotstore.get_pending_for_block(dot.site, dot.b_idx);
                 for op in pending_ops {
                     self.apply_op(&op);
                 }
