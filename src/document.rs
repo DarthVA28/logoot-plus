@@ -300,15 +300,15 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
 }
 
 fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
-    let val = op.ids[0].clone();
+    let val = &op.ids[0];
     let block_id = val.0.b_idx;
-    let base  = val.1;
+    let base = &val.1;
     let offset = val.2;
     let text = op.payload.as_ref().expect("No payload for insert operation");
     let site = op.site;
 
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, &base, offset, block_id, text.to_string())
+    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, base, offset, block_id, text.to_string())
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
