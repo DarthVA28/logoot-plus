@@ -940,6 +940,7 @@ impl Tree {
     /// Delete the node at `path.last()` using the path directly.
     /// This is the same algorithm as delete_by_id's second half, but skips
     /// the find_by_id traversal since we already have the path.
+
     pub fn delete_target(&mut self, dot_index: &mut DotIndex, target: Option<usize>) {
         if target.is_none() {
             return;
@@ -960,38 +961,54 @@ impl Tree {
                 self.splice(curr, Some(child));
                 dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
             }
-            (Some(_), Some(r)) => {
-                // Two children: replace with in-order successor, then delete successor.
-                // let mut succ_path: Path = Path::from_slice(path);
+            (Some(l), Some(r)) => {
+                // Find in-order successor (leftmost in right subtree)
                 let mut succ = r;
-                while let Some(l) = self.nodes[succ].left {
-                    succ = l;
+                while let Some(left) = self.nodes[succ].left {
+                    succ = left;
                 }
 
-                // Copy successor's payload into target.
-                // let succ_data = self.nodes[succ].clone();
-                let succ_content = std::mem::take(&mut self.nodes[succ].content);
-                let succ_base    = self.nodes[succ].base_id;
-                let succ_offset  = self.nodes[succ].offset;
-                let succ_size    = self.nodes[succ].size;
-                let succ_creator = self.nodes[succ].creator;
-                let succ_block_idx = self.nodes[succ].block_idx;
-
-                let tn = &mut self.nodes[curr];
-                tn.content = succ_content;
-                tn.base_id = succ_base;
-                tn.offset  = succ_offset;
-                tn.size    = succ_size;
-                tn.creator = succ_creator;
-                tn.block_idx = succ_block_idx;
-
-                // Delete successor 
                 let succ_right = self.nodes[succ].right;
-                self.splice(succ, succ_right);
+                let target_parent = self.nodes[curr].parent;
+                let rebalance_from;
 
-                // Update dot index 
+                if succ == r {
+                    // Successor is the direct right child of target.
+                    // Just give it target's left child.
+                    self.nodes[succ].left = Some(l);
+                    self.nodes[l].parent = Some(succ);
+                    rebalance_from = succ;
+                } else {
+                    // Successor is deeper. Detach it from its parent.
+                    let succ_parent = self.nodes[succ].parent.unwrap();
+                    self.nodes[succ_parent].left = succ_right;
+                    if let Some(sr) = succ_right {
+                        self.nodes[sr].parent = Some(succ_parent);
+                    }
+
+                    // Wire successor into target's position
+                    self.nodes[succ].left = Some(l);
+                    self.nodes[succ].right = Some(r);
+                    self.nodes[l].parent = Some(succ);
+                    self.nodes[r].parent = Some(succ);
+                    rebalance_from = succ_parent;
+                }
+
+                // Rewire target's parent to point to successor
+                self.nodes[succ].parent = target_parent;
+                if let Some(p) = target_parent {
+                    if self.nodes[p].left == Some(curr) {
+                        self.nodes[p].left = Some(succ);
+                    } else {
+                        self.nodes[p].right = Some(succ);
+                    }
+                } else {
+                    self.root = Some(succ);
+                }
+
+                self.free(curr);
                 dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
-                dot_index.on_node_remapped(succ_creator, succ_block_idx, succ_offset, curr);
+                self.rebalance(Some(rebalance_from));
             }
         }
     }

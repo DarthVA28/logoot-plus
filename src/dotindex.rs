@@ -126,4 +126,23 @@ impl DotIndex {
     pub fn total_ranges(&self) -> usize {
         self.replicas.values().map(|blocks| blocks.iter().map(|r| r.len()).sum::<usize>()).sum()
     }
+
+    /// Returns all ranges in the given block that overlap [query_lo, query_hi),
+    /// sorted by seq_lo. Gaps in coverage become pending deletes.
+    pub fn overlapping_ranges(&self, site: u32, block_idx: u32, query_lo: u32, query_hi: u32) -> SmallVec<[(u32, u32, usize); 4]> {
+        let mut result = SmallVec::new();
+        if let Some(blocks) = self.replicas.get(&site) {
+            if let Some(ranges) = blocks.get(block_idx as usize) {
+                for &(lo, hi, node_idx) in ranges {
+                    // Does [lo, hi) overlap [query_lo, query_hi)?
+                    if lo < query_hi && hi > query_lo {
+                        result.push((lo, hi, node_idx));
+                    }
+                }
+            }
+        }
+        // Sort by lo so we can walk left-to-right and detect gaps
+        result.sort_unstable_by_key(|&(lo, _, _)| lo);
+        result
+    }
 }

@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, generate_base};
 use crate::node::Node;
 use crate::tree::{DelLocation, Tree};
@@ -365,63 +367,52 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
 }
 
 fn remote_delete(doc: &mut Document, op: &WireDelta) {
-    let del_ids = &op.ids;
-    for (dot, id, start, end) in del_ids {
-        // println!("Remote delete of id {:?} from offset {} to {} at site {} at replica {}", id, start, end, op.site, doc.state.replica);
-        // start is inclusive, end is exclusive
-        let offsets_len = end - start;
-        let mut processed = 0;
-        while processed < offsets_len {
-            // FIXME: place of inefficiency
-            let node = doc.dot_index.lookup(dot.site, dot.b_idx, start + processed);
-            // let node = doc.blocks.find_by_id_exact(&doc.id_arena, &id, start + processed);
-            if node.is_none() {
-                // base id exists but this offset is missing 
-                let missing_start = start + processed;
-                processed += 1;
-                while processed < offsets_len {
-                    if doc.dot_index.lookup(dot.site, dot.b_idx, start + processed).is_none() {
-                        processed += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let partial_op = WireDelta {
+    for (dot, id, start, end) in &op.ids {
+        let ranges = doc.dot_index.overlapping_ranges(dot.site, dot.b_idx, *start, *end);
+
+        // Detect gaps → pending
+        let mut cursor = *start;
+        for &(r_lo, r_hi, _) in &ranges {
+            let gap_end = r_lo.min(*end);
+            if cursor < gap_end {
+                doc.dotstore.add_to_pending(dot, WireDelta {
                     op_type: OperationType::Delete,
-                    ids: vec![(dot.clone(), id.clone(), missing_start, start + processed)],
+                    ids: vec![(dot.clone(), id.clone(), cursor, gap_end)],
                     payload: None,
                     site: op.site,
-                };
-                doc.dotstore.add_to_pending(dot, partial_op);
-                continue;
-
+                });
             }
-            // Verify if the base id of the blocks are the same else continue 
-            // if doc.blocks.node_base_id(*path.last().unwrap()) != *id {
-            //     // Throw an error 
-            //     panic!("Error in delete -- block with id {:?} and offset {} not found during remote delete at site {}, found block with base id {:?} instead", id, start + processed, doc.state.replica, doc.blocks.node_base_id(*path.last().unwrap()));
-            // }
-            let block: usize = node.unwrap();
-            // let base_id = doc.blocks.node_base_id(block);
+            cursor = r_hi.max(cursor);
+        }
+        if cursor < *end {
+            doc.dotstore.add_to_pending(dot, WireDelta {
+                op_type: OperationType::Delete,
+                ids: vec![(dot.clone(), id.clone(), cursor, *end)],
+                payload: None,
+                site: op.site,
+            });
+        }
+
+        // Process right-to-left so mutations don't affect unprocessed nodes
+        for &(r_lo, r_hi, block) in ranges.iter().rev() {
+            let ov_lo = (*start).max(r_lo);
+            let ov_hi = (*end).min(r_hi);
+            if ov_lo >= ov_hi { continue; }
+
             let block_ranges = doc.blocks.node_ranges(block);
             let block_size = block_ranges.1 - block_ranges.0;
-            let offset = start + processed;
+            let n = ov_hi.min(block_ranges.1) - ov_lo.max(block_ranges.0);
 
-            let n_in_block = end.min(&block_ranges.1) - offset.max(block_ranges.0);
-
-            // Same 4 cases as local delete
-            if offset == block_ranges.0 && n_in_block >= block_size {
-                // Case 1: delete the entire block 
+            if ov_lo == block_ranges.0 && n >= block_size {
                 doc.blocks.delete_target(&mut doc.dot_index, Some(block));
-            } else if offset == block_ranges.0 {
-                doc.blocks.truncate_content(&mut doc.dot_index, block, n_in_block as usize, DelLocation::Start);
-            } else if offset + n_in_block as u32 >= block_ranges.1 {
-                doc.blocks.truncate_content(&mut doc.dot_index, block, n_in_block as usize, DelLocation::End);
+            } else if ov_lo == block_ranges.0 {
+                doc.blocks.truncate_content(&mut doc.dot_index, block, n as usize, DelLocation::Start);
+            } else if ov_hi >= block_ranges.1 {
+                doc.blocks.truncate_content(&mut doc.dot_index, block, n as usize, DelLocation::End);
             } else {
-                let sp = (offset - block_ranges.0) as usize;
-                doc.blocks.delete_middle_at_target(&mut doc.dot_index, block, sp, n_in_block as usize);             
+                let sp = (ov_lo - block_ranges.0) as usize;
+                doc.blocks.delete_middle_at_target(&mut doc.dot_index, block, sp, n as usize);
             }
-            processed += n_in_block;
         }
     }
 }
