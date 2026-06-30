@@ -1,89 +1,129 @@
-// use std::collections::BTreeMap;
-use btree_experiment::BTreeMap;
-use core::panic;
-use std::ops::Bound;
+use ahash::AHashMap as HashMap;
+use smallvec::SmallVec;
+
+type RangeList = SmallVec<[(u32, u32, usize); 2]>; // (seq_lo, seq_hi, node_idx)
 
 #[derive(Clone, Debug)]
 pub struct DotIndex {
-    ranges: BTreeMap<(u32, u32), (u32, usize)>,
+    replicas: HashMap<u32, Vec<RangeList>>,
 }
 
 impl DotIndex {
     pub fn new() -> Self {
-        DotIndex { ranges: BTreeMap::new() }
+        DotIndex { replicas: HashMap::new() }
     }
 
     pub fn clear(&mut self) {
-        self.ranges.clear();
+        self.replicas.clear();
+    }
+
+    fn ensure_slot(&mut self, creator: u32, block_idx: u32) -> &mut RangeList {
+        let blocks = self.replicas.entry(creator).or_default();
+        let idx = block_idx as usize;
+        if blocks.len() <= idx {
+            blocks.resize(idx + 1, SmallVec::new());
+        }
+        &mut blocks[idx]
     }
 
     #[inline]
-    pub fn lookup(&self, site: u32, seq: u32) -> Option<usize> {
-        let (&(s, _), &(hi, node_idx)) = self.ranges.range(..=(site, seq)).next_back()?;
-        if s == site && seq < hi { Some(node_idx) } else { None }
+    pub fn lookup(&self, site: u32, block_idx: u32, seq: u32) -> Option<usize> {
+        let blocks = self.replicas.get(&site)?;
+        let ranges = blocks.get(block_idx as usize)?;
+        for &(lo, hi, node_idx) in ranges {
+            if seq >= lo && seq < hi {
+                return Some(node_idx);
+            }
+        }
+        None
     }
 
-    #[inline]
-    pub fn lookup_range(&self, site: u32, seq: u32) -> Option<(u32, u32, usize)> {
-        let (&(s, lo), &(hi, node_idx)) = self.ranges.range(..=(site, seq)).next_back()?;
-        if s == site && seq < hi { Some((lo, hi, node_idx)) } else { None }
+    pub fn on_block_inserted(&mut self, creator: u32, block_idx: u32, seq_lo: u32, seq_hi: u32, node_idx: usize) {
+        self.ensure_slot(creator, block_idx).push((seq_lo, seq_hi, node_idx));
     }
 
-    pub fn on_block_inserted(&mut self, creator: u32, seq_lo: u32, seq_hi: u32, node_idx: usize) {
-        self.ranges.insert((creator, seq_lo), (seq_hi, node_idx));
+    pub fn on_block_extended(&mut self, creator: u32, block_idx: u32, seq_lo: u32, new_hi: u32) {
+        let ranges = self.ensure_slot(creator, block_idx);
+        for entry in ranges.iter_mut() {
+            if entry.0 == seq_lo {
+                entry.1 = new_hi;
+                return;
+            }
+        }
+        panic!("extend: range starting at {} not found for site {} block {}", seq_lo, creator, block_idx);
     }
 
-    pub fn on_block_extended(&mut self, creator: u32, seq_lo: u32, new_hi: u32) {
-        let entry = self.ranges.get_mut(&(creator, seq_lo)).expect("extend: not found");
-        entry.0 = new_hi;
+    pub fn on_block_split(&mut self, creator: u32, block_idx: u32, seq_lo: u32, split_seq: u32, new_node_idx: usize) {
+        let ranges = self.ensure_slot(creator, block_idx);
+        let mut old_hi = 0;
+        let mut found = false;
+        for entry in ranges.iter_mut() {
+            if entry.0 == seq_lo {
+                old_hi = entry.1;
+                entry.1 = split_seq; // left half shrinks
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "split: not found");
+        ranges.push((split_seq, old_hi, new_node_idx)); // right half
     }
 
-    pub fn on_block_split(&mut self, creator: u32, seq_lo: u32, split_seq: u32, new_node_idx: usize) {
-        // Modify left half in place
-        let entry = self.ranges.get_mut(&(creator, seq_lo))
-            .expect("split: not found");
-        let old_hi = entry.0;
-        entry.0 = split_seq;
-        // Insert right half using cursor — positioned near the key we just modified
-        let mut cursor = self.ranges.upper_bound_mut(Bound::Included(&(creator, seq_lo)));
-        let res =cursor.insert_after((creator, split_seq), (old_hi, new_node_idx));
-        if res.is_err() {
-            panic!("split: insert_after failed");
+    pub fn on_block_deleted(&mut self, creator: u32, block_idx: u32, seq_lo: u32) {
+        let ranges = self.ensure_slot(creator, block_idx);
+        if let Some(pos) = ranges.iter().position(|&(lo, _, _)| lo == seq_lo) {
+            ranges.swap_remove(pos);
         }
     }
 
-    pub fn on_block_deleted(&mut self, creator: u32, seq_lo: u32) {
-        self.ranges.remove(&(creator, seq_lo));
-    }
-
-    pub fn on_block_truncated_start(&mut self, creator: u32, old_lo: u32, new_lo: u32) {
-        let mut cursor = self.ranges.upper_bound_mut(Bound::Included(&(creator, old_lo)));
-        let (_, (hi, node_idx)) = cursor.remove_prev()
-            .expect("trunc_start: not found");
-        let res = cursor.insert_before((creator, new_lo), (hi, node_idx));
-        if res.is_err() {
-            panic!("trunc_start: insert_before failed");
+    pub fn on_block_truncated_start(&mut self, creator: u32, block_idx: u32, old_lo: u32, new_lo: u32) {
+        let ranges = self.ensure_slot(creator, block_idx);
+        for entry in ranges.iter_mut() {
+            if entry.0 == old_lo {
+                entry.0 = new_lo;
+                return;
+            }
         }
+        panic!("trunc_start: not found");
     }
 
-    pub fn on_block_truncated_end(&mut self, creator: u32, seq_lo: u32, new_hi: u32) {
-        let entry = self.ranges.get_mut(&(creator, seq_lo)).expect("trunc_end: not found");
-        entry.0 = new_hi;
+    pub fn on_block_truncated_end(&mut self, creator: u32, block_idx: u32, seq_lo: u32, new_hi: u32) {
+        let ranges = self.ensure_slot(creator, block_idx);
+        for entry in ranges.iter_mut() {
+            if entry.0 == seq_lo {
+                entry.1 = new_hi;
+                return;
+            }
+        }
+        panic!("trunc_end: not found");
     }
 
-    pub fn on_node_remapped(&mut self, creator: u32, seq_lo: u32, new_node_idx: usize) {
-        let entry = self.ranges.get_mut(&(creator, seq_lo)).expect("remap: not found");
-        entry.1 = new_node_idx;
+    pub fn on_node_remapped(&mut self, creator: u32, block_idx: u32, seq_lo: u32, new_node_idx: usize) {
+        let ranges = self.ensure_slot(creator, block_idx);
+        for entry in ranges.iter_mut() {
+            if entry.0 == seq_lo {
+                entry.2 = new_node_idx;
+                return;
+            }
+        }
+        panic!("remap: not found");
     }
 
     pub fn on_block_middle_deleted(
-        &mut self, creator: u32, seq_lo: u32,
+        &mut self, creator: u32, block_idx: u32, seq_lo: u32,
         left_end: u32, right_start: u32, right_end: u32, right_node: usize,
     ) {
-        let entry = self.ranges.get_mut(&(creator, seq_lo)).expect("mid_del: not found");
-        entry.0 = left_end;
-        self.ranges.insert((creator, right_start), (right_end, right_node));
+        let ranges = self.ensure_slot(creator, block_idx);
+        for entry in ranges.iter_mut() {
+            if entry.0 == seq_lo {
+                entry.1 = left_end; // shrink left half
+                break;
+            }
+        }
+        ranges.push((right_start, right_end, right_node)); // right half
     }
 
-    pub fn total_ranges(&self) -> usize { self.ranges.len() }
+    pub fn total_ranges(&self) -> usize {
+        self.replicas.values().map(|blocks| blocks.iter().map(|r| r.len()).sum::<usize>()).sum()
+    }
 }

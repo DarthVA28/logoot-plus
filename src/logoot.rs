@@ -510,6 +510,15 @@ mod b2_inside_b1_stress {
                 net.ins(site, pos, ch);
             }
 
+            // println!("Site {} content: '{}'", site, net.read(site));
+            // net.docs[site].blocks.print_tree(&net.docs[site].id_arena);
+
+            // Print all docs
+            // for i in 0..n {
+            //     println!("Site {} content: '{}'", i, net.read(i));
+            //     net.docs[i].blocks.print_tree(&net.docs[i].id_arena);
+            // }
+
             // Every ~5 rounds, randomly drain some (not all) pending ops
             // to simulate partial, out-of-order delivery
             if round % 5 == 0 {
@@ -524,11 +533,7 @@ mod b2_inside_b1_stress {
                     let qi = rng.random_range(0..net.pending[s].len());
                     net.deliver(s, qi);
                 }
-                // Print all docs
-                // for i in 0..n {
-                //     println!("Site {} content: '{}'", i, net.read(i));
-                //     net.docs[i].blocks.print_tree();
-                // }
+                
             }
         }
 
@@ -547,8 +552,9 @@ mod b2_inside_b1_stress {
     #[test]
     fn test_deep_stress_random_delivery() {
         for seed in 100000..200000 {
+            println!("running seed: {}", seed);
             run_deep_stress(seed);
         }
-        // run_deep_stress(1219);
+        // run_deep_stress(105885);
     }
 }

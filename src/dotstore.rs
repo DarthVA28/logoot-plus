@@ -5,6 +5,7 @@ use crate::{delta::{Delta, WireDelta}};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Dot { 
     pub site: u32,
+    pub b_idx: u32,
     pub seq: u32
 }
 
@@ -61,19 +62,6 @@ impl DotStore {
     pub fn get_pending_for_id(&mut self, id: &[u32]) -> Vec<WireDelta> {
         self.pending.remove(id).unwrap_or_default()
     }
-
-    // pub fn get_pending_for_dot(&self, dot: &Dot) -> Vec<WireDelta> {
-    //     self.pending.iter()
-    //         .filter(|(pending_dot, _)| pending_dot.site == dot.site && pending_dot.seq == dot.seq)
-    //         .map(|(_, op)| op.clone())
-    //         .collect()
-    // }
-
-    // pub fn add_to_pending(&mut self, op: WireDelta) {
-    //     for (dot, _id, _lo, _hi) in &op.ids {
-    //         self.pending.insert(dot.clone(), op.clone());
-    //     }
-    // }
 
     pub fn clear(&mut self) {
         self.versions.clear();

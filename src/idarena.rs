@@ -4,7 +4,8 @@ use crate::state::State;
 use rand::RngExt;
 
 pub const MIN_VALUE: u32 = 0;
-pub const MAX_VALUE: u32 = 100000;
+// pub const MAX_VALUE: u32 = 100000;
+pub const MAX_VALUE: u32 = 0xFFFF_0000;
 pub const MAX_AGENTS: u32 = 1000;
 pub type Range = (u32, u32);
 
@@ -331,30 +332,6 @@ impl IdArena {
         }
     } 
 
-    /// How many characters from `insert` can be placed before `next`.
-    /// Replaces the old num_insertable(IdentifierRef, IdentifierRef, u32).
-    // pub fn num_insertable(
-    //     &self,
-    //     insert_base: Identifier, insert_extra: u32,
-    //     next_base: Identifier, next_extra: u32,
-    //     length: u32,
-    // ) -> u32 {
-    //     let insert_slice = self.get_slice_unchecked(insert_base);
-    //     let next_slice = self.get_slice_unchecked(next_base);
-
-    //     let l = insert_slice.len();
-
-    //     if l >= next_slice.len() + 1 { return length; }
-
-    //     let next_full_iter = next_slice.iter().chain(std::iter::once(&next_extra));
-    //     for (&a, &b) in insert_slice.iter().zip(next_full_iter) {
-    //         if a != b { return length; }
-    //     }
-
-    //     let next_at_l = if l < next_slice.len() { next_slice[l] } else { next_extra };
-    //     next_at_l + 1 - insert_extra
-    // }
-
     pub fn num_insertable(
         &self,
         insert_base: Identifier, insert_seq: u32,
@@ -386,15 +363,6 @@ impl IdArena {
             next_seq
         };
 
-        // If ilen < next_slice.len(): the constraining element is a seq from a
-        // prefix tuple, and there are more elements after it in next_full.
-        // insert_seq + k == constraining means insert's position is a prefix of next → fits.
-        // So count = constraining + 1 - insert_seq.
-        //
-        // If ilen == next_slice.len(): constraining == next_seq, and this is the LAST
-        // element. insert_seq + k == next_seq means EQUAL positions → does NOT fit.
-        // So count = constraining - insert_seq = next_seq - insert_seq.
-
         let count = if ilen < next_slice.len() {
             constraining + 1 - insert_seq
         } else {
@@ -404,43 +372,6 @@ impl IdArena {
 
         count.min(length)
     }
-
-    /// Find where to split `idi_short` (base, lo, hi) when `id_long` falls inside it.
-    // pub fn find_split_point(
-    //     &self,
-    //     short_slice: &[u32], short_lo: u32, short_hi: u32,
-    //     long_slice: &[u32],
-    // ) -> u32 {
-    //     if long_slice.is_empty() { return 0; }
-
-    //     let text_len = short_hi - short_lo;
-    //     if text_len == 0 { return 0; }
-
-    //     // let long_slice = self.get_slice_unchecked(id_long);
-    //     // let short_slice = self.get_slice_unchecked(short_base);
-
-    //     let min_len = short_slice.len().min(long_slice.len());
-
-    //     let short_prefix = unsafe { short_slice.get_unchecked(..min_len) };
-    //     let long_prefix = unsafe { long_slice.get_unchecked(..min_len) };
-    //     match short_prefix.cmp(long_prefix) {
-    //         Ordering::Less  => return text_len,
-    //         Ordering::Greater => return 0,
-    //         Ordering::Equal => {}
-    //     }
-
-    //     if short_slice.len() < long_slice.len() {
-    //         let pivot = unsafe { *long_slice.get_unchecked(min_len) };
-    //         let extras_below = if long_slice.len() > min_len + 1 {
-    //             pivot.saturating_add(1).saturating_sub(short_lo)
-    //         } else {
-    //             pivot.saturating_sub(short_lo)
-    //         };
-    //         return extras_below.min(text_len);
-    //     } else {
-    //         return 0;
-    //     }
-    // }
 
     pub fn find_split_point(
         &self,
@@ -501,35 +432,6 @@ impl IdArena {
     }
 }
 
-// pub fn generate_base(
-//     arena: &mut IdArena,
-//     low_base: Identifier, low_extra: u32,
-//     high_base: Identifier, high_extra: u32,
-//     state: &mut State,
-// ) -> Identifier {
-//     let low_slice = arena.get_slice(low_base);
-//     let high_slice = arena.get_slice(high_base);
-
-//     let mut new_path: Vec<u32> = Vec::new();
-//     let mut low_iter = low_slice.iter().copied().chain(std::iter::once(low_extra));
-//     let mut high_iter = high_slice.iter().copied().chain(std::iter::once(high_extra));
-
-//     let mut l = low_iter.next().unwrap_or(MIN_VALUE);
-//     let mut h = high_iter.next().unwrap_or(MAX_VALUE);
-
-//     while (h as i32) - (l as i32) < 2 {
-//         new_path.push(l);
-//         l = low_iter.next().unwrap_or(MIN_VALUE);
-//         h = high_iter.next().unwrap_or(MAX_VALUE);
-//     }
-
-//     let nxt = state.rng.random_range(l + 1..h);
-//     new_path.push(nxt);
-//     new_path.push(state.replica + state.local_clock * MAX_AGENTS);
-
-//     arena.intern(&new_path)
-// }
-
 pub fn generate_base(
     arena: &mut IdArena,
     low_base: Identifier, low_extra: u32,
@@ -554,9 +456,9 @@ pub fn generate_base(
     loop {
         let l_c = low_full.get(depth * 2).copied().unwrap_or(0);
         let h_c = if high_unconstrained {
-            MAX_VALUE << 16
+            MAX_VALUE
         } else {
-            high_full.get(depth * 2).copied().unwrap_or(MAX_VALUE << 16)
+            high_full.get(depth * 2).copied().unwrap_or(MAX_VALUE)
         };
 
         let l_p = decode_priority(l_c) + 1;

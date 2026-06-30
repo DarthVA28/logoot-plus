@@ -1,10 +1,8 @@
 use core::panic;
 use std::cmp::Ordering;
-// use std::collections::HashMap;
 use ahash::AHashMap as HashMap;
 use crate::dotindex::DotIndex;
 use crate::node::Node;
-// use crate::identifier::{Id, IdOrderingRelation, Identifier, IdentifierInterval, IdentifierRef, compare_intervals, compare_intervals_raw, num_insertable};
 use crate::idarena::{Identifier, IdOrderingRelation, IdArena};
 use smallvec::SmallVec;
 
@@ -123,6 +121,10 @@ impl Tree {
         self.nodes[node].base_id = new_base;
     }
 
+    pub fn node_block_idx(&self, node: usize) -> u32 {
+        self.nodes[node].block_idx
+    }
+
     pub fn extend_content(&mut self, dot_index: &mut DotIndex, node_idx: usize, text: &str) {
         let node = &mut self.nodes[node_idx];
         node.content.push_str(text);
@@ -134,7 +136,7 @@ impl Tree {
             let new_hi = hi + added_size as u32;
             self.base_to_offsets.insert(base_id, (*lo, new_hi));
         } 
-        dot_index.on_block_extended(node.creator, node.offset, node.offset + node.size as u32);
+        dot_index.on_block_extended(node.creator, node.block_idx, node.offset, node.offset + node.size as u32);
         // update everything till root 
         let mut curr = Some(node_idx);
         while let Some(idx) = curr {
@@ -173,10 +175,10 @@ impl Tree {
         }
 
         if is_start {
-            dot_index.on_block_truncated_start(creator, old_offset, old_offset + num_delete as u32);
+            dot_index.on_block_truncated_start(creator, self.nodes[node_idx].block_idx, old_offset, old_offset + num_delete as u32);
         } else {
             let new_hi = self.nodes[node_idx].offset + self.nodes[node_idx].size as u32;
-            dot_index.on_block_truncated_end(creator, old_offset, new_hi);
+            dot_index.on_block_truncated_end(creator, self.nodes[node_idx].block_idx, old_offset, new_hi);
         }
 
         let mut curr = Some(node_idx);
@@ -442,19 +444,19 @@ impl Tree {
 
     /// Insert the node by identifier  
     /// Return the interned identifier
-    pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, dot_index: &mut DotIndex, base: &[u32], offset: u32, content: String) -> Identifier {
+    pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, dot_index: &mut DotIndex, base: &[u32], offset: u32, block_idx: u32, content: String) -> Identifier {
         let len = content.len() as u32;
-        let idx = self.alloca(Node::new(content, Identifier::EMPTY, offset, site));
+        let idx = self.alloca(Node::new(content, Identifier::EMPTY, offset, site, block_idx));
         if self.is_empty() {
             let base_id = id_arena.intern(base);
             self.node_set_base_id(idx, base_id);
             self.root = Some(idx);
             self.base_to_offsets.insert(base_id, (offset, offset + len));
-            dot_index.on_block_inserted(site, offset, offset + len, idx);
+            dot_index.on_block_inserted(site, block_idx, offset, offset + len, idx);
             return base_id;
         }
         let from = self.root.unwrap();
-        let base_id = self.insert_rec(id_arena, dot_index, idx, base, offset, offset + len, from, len, site);
+        let base_id = self.insert_rec(id_arena, dot_index, idx, base, offset, offset + len, from, len, site, block_idx);
         if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
             let new_hi = std::cmp::max(*hi, offset + len);
             self.base_to_offsets.insert(base_id.clone(), (*lo, new_hi));
@@ -464,7 +466,7 @@ impl Tree {
         base_id
     }
 
-    pub fn insert_rec(&mut self, id_arena: &mut IdArena, dot_index: &mut DotIndex, node: usize, node_base: &[u32], node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32) -> Identifier {
+    pub fn insert_rec(&mut self, id_arena: &mut IdArena, dot_index: &mut DotIndex, node: usize, node_base: &[u32], node_lo: u32, node_hi: u32, mut from: usize, len: u32, site: u32, block_idx: u32) -> Identifier {
         // let mut path = Path::new();
         let mut con = true;
         let mut rec = false;
@@ -489,7 +491,7 @@ impl Tree {
                         from_node.right = Some(node);
                         self.nodes[node].parent = Some(from);
                         self.node_set_base_id(node, inserted_id);
-                        dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                        dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         con = false;
                     }
                 }
@@ -508,7 +510,7 @@ impl Tree {
                         } else {
                             self.node_set_base_id(node, inserted_id);
                         }
-                        dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                        dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         con = false;
                     }
                 },
@@ -519,7 +521,7 @@ impl Tree {
                     } else {
                         from_node.left = Some(node);
                         self.nodes[node].parent = Some(from);
-                        dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                        dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         // Intern the identifier
                         if inserted_id == Identifier::EMPTY {
                             let base_id = id_arena.intern(node_base);
@@ -539,13 +541,13 @@ impl Tree {
                     } else {
                         from_node.left = Some(node);
                         self.nodes[node].parent = Some(from);
-                        dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                        dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         self.node_set_base_id(node, inserted_id);
                         con = false;
                     }
                 },
                 IdOrderingRelation::B1InsideB2 => {
-                    let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content) = {
+                    let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content, from_block_idx) = {
                         let from_node = &self.nodes[from];
                         let f_offset = from_node.offset;
                         let from_slice = id_arena.get_slice_unchecked(from_node.base_id);
@@ -558,11 +560,11 @@ impl Tree {
                             .map(|(idx, _)| idx)
                             .unwrap_or(from_content_ref.len());
                         let from_content = std::mem::take(&mut from_node.content);
-                        (sp, b_idx, &from_node.base_id, from_node.offset, from_node.creator, from_content)
+                        (sp, b_idx, &from_node.base_id, from_node.offset, from_node.creator, from_content, from_node.block_idx)
                     };
 
                     let rcontent = from_content.split_off(b_idx);
-                    let right_node = Node::new(rcontent, from_base_id.clone(), from_offset + sp, from_creator);
+                    let right_node = Node::new(rcontent, from_base_id.clone(), from_offset + sp, from_creator, from_block_idx);
                     let right_idx = self.alloca(right_node);
 
                     // Detach original_right BEFORE mutating from
@@ -586,8 +588,9 @@ impl Tree {
                     self.nodes[from].right = Some(joined);
                     
                     // Update dot index 
-                    dot_index.on_block_split(from_creator, from_offset, from_offset+sp, right_idx);
-                    dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                    let from_block_idx = self.nodes[from].block_idx;
+                    dot_index.on_block_split(from_creator, from_block_idx, from_offset, from_offset+sp, right_idx);
+                    dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                     
                     con = false;
                 },
@@ -608,12 +611,12 @@ impl Tree {
                                 from_node.right = Some(node);
                                 self.nodes[node].parent = Some(from);
                                 self.node_set_base_id(node, node_base_id);
-                                dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                                dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                                 break;
                             }
                         }
                     }
-                    if self.node_creator(from) != site {
+                    if self.nodes[from].creator != site || self.nodes[from].block_idx != block_idx {
                         let from_node = &mut self.nodes[from];
                         if let Some(r) = from_node.right {
                             from = r;
@@ -622,7 +625,7 @@ impl Tree {
                             from_node.right = Some(node);
                             self.nodes[node].parent = Some(from);
                             self.node_set_base_id(node, node_base_id);
-                            dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                            dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                             break;
                         }
                     }
@@ -643,7 +646,7 @@ impl Tree {
                             from_node.content.push_str(&content);
                             from_node.size += len as usize;
                             // Update dot_index
-                            dot_index.on_block_extended(site, from_node.offset, from_node.offset + from_node.size as u32);
+                            dot_index.on_block_extended(site, from_node.block_idx, from_node.offset, from_node.offset + from_node.size as u32);
                             self.free(node);
                             con = false;
                         }
@@ -653,7 +656,7 @@ impl Tree {
                         from_node.content.push_str(&content);
                         from_node.size = from_node.content.len();
                         // Update dot_index
-                        dot_index.on_block_extended(site, from_node.offset, from_node.offset + from_node.size as u32);
+                        dot_index.on_block_extended(site, from_node.block_idx, from_node.offset, from_node.offset + from_node.size as u32);
                         self.free(node);
                         con = false;
                     }
@@ -681,8 +684,8 @@ impl Tree {
                     let left_content  = content[..byte_idx].to_string();
                     let right_content = content[byte_idx..].to_string();
                     
-                    let id1 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo, left_content);
-                    let id2 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo + sp, right_content);
+                    let id1 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo, block_idx, left_content);
+                    let id2 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo + sp, block_idx, right_content);
 
                     // id1 and id2 should be equal 
                     debug_assert_eq!(id1, id2);
@@ -708,7 +711,7 @@ impl Tree {
                         } else {
                             self.node_set_base_id(node, inserted_id);
                         }
-                        dot_index.on_block_inserted(site, node_lo, node_hi, node);
+                        dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         con = false;
                     }
                 },
@@ -832,7 +835,7 @@ impl Tree {
     pub fn insert_after(&mut self, dot_index: &mut DotIndex, target: usize, node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
-        dot_index.on_block_inserted(n.creator, n.offset, n.offset + n.size as u32, new_idx);
+        dot_index.on_block_inserted(n.creator, n.block_idx, n.offset, n.offset + n.size as u32, new_idx);
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
         let last;
@@ -859,7 +862,7 @@ impl Tree {
     pub fn insert_before(&mut self, dot_index: &mut DotIndex, target: usize, node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
-        dot_index.on_block_inserted(n.creator, n.offset, n.offset + n.size as u32, new_idx);
+        dot_index.on_block_inserted(n.creator, n.block_idx, n.offset, n.offset + n.size as u32, new_idx);
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
         let last;
@@ -894,7 +897,8 @@ impl Tree {
         let base_id = self.nodes[target].base_id;
         let offset  = self.nodes[target].offset;
         let creator = self.nodes[target].creator;
-        let original_right = self.nodes[target].right;
+        let target_right = self.nodes[target].right;
+        let target_block_idx = self.nodes[target].block_idx;
 
         let content = std::mem::take(&mut self.nodes[target].content);
         let byte_idx = content
@@ -909,7 +913,7 @@ impl Tree {
         self.nodes[target].content = left_content;
         self.nodes[target].size = sp;
 
-        let right_node = Node::new(right_content, base_id, offset + sp as u32, creator);
+        let right_node = Node::new(right_content, base_id, offset + sp as u32, creator, target_block_idx);
         let right_idx = self.alloca(right_node);
 
         
@@ -918,13 +922,14 @@ impl Tree {
         let middle_offset = middle.offset;
         let middle_size   = middle.size as u32;
         let middle_idx = self.alloca(middle);
+        let middle_block_idx = self.nodes[middle_idx].block_idx;
         self.register_base_offsets(middle_base, middle_offset, middle_size);
 
         // Update dot index
-        dot_index.on_block_split(creator, offset, offset + sp as u32, right_idx);
-        dot_index.on_block_inserted(middle_creator, middle_offset, middle_offset + middle_size as u32, middle_idx);
+        dot_index.on_block_split(creator, target_block_idx, offset, offset + sp as u32, right_idx);
+        dot_index.on_block_inserted(middle_creator, middle_block_idx, middle_offset, middle_offset + middle_size as u32, middle_idx);
 
-        let joined = self.join(Some(middle_idx), right_idx, original_right);
+        let joined = self.join(Some(middle_idx), right_idx, target_right);
         self.nodes[target].right = Some(joined);
         self.nodes[joined].parent = Some(target);
 
@@ -944,15 +949,16 @@ impl Tree {
         let right = self.nodes[curr].right;
         let target_creator = self.nodes[curr].creator;
         let target_offset = self.nodes[curr].offset;
+        let target_block_idx = self.nodes[curr].block_idx;
 
         match (left, right) {
             (None, None) => {
                 self.splice(curr, None);
-                dot_index.on_block_deleted(target_creator, target_offset);
+                dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
             }
             (Some(child), None) | (None, Some(child)) => {
                 self.splice(curr, Some(child));
-                dot_index.on_block_deleted(target_creator, target_offset);
+                dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
             }
             (Some(_), Some(r)) => {
                 // Two children: replace with in-order successor, then delete successor.
@@ -969,6 +975,7 @@ impl Tree {
                 let succ_offset  = self.nodes[succ].offset;
                 let succ_size    = self.nodes[succ].size;
                 let succ_creator = self.nodes[succ].creator;
+                let succ_block_idx = self.nodes[succ].block_idx;
 
                 let tn = &mut self.nodes[curr];
                 tn.content = succ_content;
@@ -976,14 +983,15 @@ impl Tree {
                 tn.offset  = succ_offset;
                 tn.size    = succ_size;
                 tn.creator = succ_creator;
+                tn.block_idx = succ_block_idx;
 
                 // Delete successor 
                 let succ_right = self.nodes[succ].right;
                 self.splice(succ, succ_right);
 
                 // Update dot index 
-                dot_index.on_block_deleted(target_creator, target_offset);
-                dot_index.on_node_remapped(succ_creator, succ_offset, curr);
+                dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
+                dot_index.on_node_remapped(succ_creator, succ_block_idx, succ_offset, curr);
             }
         }
     }
@@ -999,8 +1007,9 @@ impl Tree {
         let base_id = self.nodes[target].base_id;
         let offset  = self.nodes[target].offset;
         let creator = self.nodes[target].creator;
-        let original_right = self.nodes[target].right;
-        let original_size = self.nodes[target].size;
+        let target_right = self.nodes[target].right;
+        let target_size = self.nodes[target].size;
+        let target_block_idx = self.nodes[target].block_idx;
 
         let content = std::mem::take(&mut self.nodes[target].content);
 
@@ -1020,19 +1029,19 @@ impl Tree {
         self.nodes[target].size = start;
 
         let right_node = Node::new(
-            right_content, base_id, offset + (start + count) as u32, creator,
+            right_content, base_id, offset + (start + count) as u32, creator, target_block_idx
         );
         let right_idx = self.alloca(right_node);
 
         // In-order: target(left half), right_idx, original_right...
         // No middle element here — right_idx is the separator
-        let joined = self.join(None, right_idx, original_right);
+        let joined = self.join(None, right_idx, target_right);
         self.nodes[target].right = Some(joined);
         self.nodes[joined].parent = Some(target);
 
         // Update dot index
-        dot_index.on_block_middle_deleted(creator, offset, offset+start as u32, 
-            offset+ (start+count) as u32, offset + original_size as u32, right_idx);
+        dot_index.on_block_middle_deleted(creator, target_block_idx, offset, offset+start as u32, 
+            offset+ (start+count) as u32, offset + target_size as u32, right_idx);
 
         self.rebalance(Some(target));
     }
@@ -1040,7 +1049,7 @@ impl Tree {
     pub fn insert_first(&mut self, dot_index: &mut DotIndex, node: Node) -> usize {
         let idx = self.alloca(node);
         let n = &self.nodes[idx];
-        dot_index.on_block_inserted(n.creator, n.offset, n.offset + n.size as u32, idx);
+        dot_index.on_block_inserted(n.creator, n.block_idx, n.offset, n.offset + n.size as u32, idx);
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
         self.root = Some(idx);
         idx
