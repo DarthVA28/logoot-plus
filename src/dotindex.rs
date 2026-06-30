@@ -134,7 +134,6 @@ impl DotIndex {
         if let Some(blocks) = self.replicas.get(&site) {
             if let Some(ranges) = blocks.get(block_idx as usize) {
                 for &(lo, hi, node_idx) in ranges {
-                    // Does [lo, hi) overlap [query_lo, query_hi)?
                     if lo < query_hi && hi > query_lo {
                         result.push((lo, hi, node_idx));
                     }

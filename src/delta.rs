@@ -18,6 +18,7 @@ pub struct Delta {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[repr(C)]
 pub struct WireDelta {
     pub op_type: OperationType,
     pub ids: Vec<(Dot, Vec<u32>, u32, u32)>,
