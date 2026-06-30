@@ -14,7 +14,7 @@ pub struct DotStore {
     /* TODO: Compare Hashmap vs Ordered Tree */
     pub versions: HashMap<u32, u32>,
     pub missing: HashMap<u32, HashSet<u32>>,
-    pub pending: HashMap<Vec<u32>, Vec<WireDelta>>,
+    pub pending: HashMap<(u32, u32), Vec<WireDelta>>,
 }
 
 impl DotStore { 
@@ -53,14 +53,18 @@ impl DotStore {
         false
     }
 
-    pub fn add_to_pending(&mut self, op: WireDelta) {
-        // println!("Adding op {:?} to pending at site {}", op, op.site);
-        let id = op.ids.first().unwrap().1.clone();
-        self.pending.entry(id).or_default().push(op);   
+    pub fn add_to_pending(&mut self, dot: &Dot, op: WireDelta) {
+        let key = (dot.site, dot.b_idx);
+        self.pending.entry(key).or_default().push(op);
     }
 
-    pub fn get_pending_for_id(&mut self, id: &[u32]) -> Vec<WireDelta> {
-        self.pending.remove(id).unwrap_or_default()
+    // pub fn get_pending_for_id(&mut self, id: &[u32]) -> Vec<WireDelta> {
+    //     self.pending.remove(id).unwrap_or_default()
+    // }
+
+    pub fn get_pending_for_block(&mut self, site: u32, block_idx: u32) -> Vec<WireDelta> {
+        let key = (site, block_idx);
+        self.pending.remove(&key).unwrap_or_default()
     }
 
     pub fn clear(&mut self) {

@@ -77,6 +77,7 @@ impl Document {
         // println!("After local delete at replica {}", self.state.replica);
         // self.blocks.print_tree(&self.id_arena);
         self.fresh = false;
+        // self.state.local_clock += 1;
         op.to_wire(&self.id_arena)
     }
 
@@ -118,7 +119,7 @@ impl Document {
         // Some operations can now possibly be applied!
         if op.op_type == OperationType::Insert {
             for (_dot, id, _, _) in &op.ids {
-                let pending_ops = self.dotstore.get_pending_for_id(id);
+                let pending_ops = self.dotstore.get_pending_for_block(_dot.site, _dot.b_idx);
                 for op in pending_ops {
                     self.apply_op(&op);
                 }
@@ -393,7 +394,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                     payload: None,
                     site: op.site,
                 };
-                doc.dotstore.add_to_pending(partial_op);
+                doc.dotstore.add_to_pending(dot, partial_op);
                 continue;
 
             }
