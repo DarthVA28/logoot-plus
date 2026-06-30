@@ -370,38 +370,35 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
     for (dot, id, start, end) in &op.ids {
         let ranges = doc.dot_index.overlapping_ranges(dot.site, dot.b_idx, *start, *end);
 
-        // Detect gaps → pending
-        let mut cursor = *start;
-        for &(r_lo, r_hi, _) in &ranges {
-            let gap_end = r_lo.min(*end);
-            if cursor < gap_end {
+        if ranges.is_empty() {
+            doc.dotstore.add_to_pending(dot, WireDelta {
+                op_type: OperationType::Delete,
+                ids: vec![(dot.clone(), id.clone(), *start, *end)],
+                payload: None,
+                site: op.site,
+            });
+            continue;
+        }
+
+        let mut cursor = *end;
+        for &(r_lo, r_hi, block) in ranges.iter().rev() {
+            if cursor > r_hi {
                 doc.dotstore.add_to_pending(dot, WireDelta {
                     op_type: OperationType::Delete,
-                    ids: vec![(dot.clone(), id.clone(), cursor, gap_end)],
+                    ids: vec![(dot.clone(), id.clone(), r_hi, cursor)],
                     payload: None,
                     site: op.site,
                 });
             }
-            cursor = r_hi.max(cursor);
-        }
-        if cursor < *end {
-            doc.dotstore.add_to_pending(dot, WireDelta {
-                op_type: OperationType::Delete,
-                ids: vec![(dot.clone(), id.clone(), cursor, *end)],
-                payload: None,
-                site: op.site,
-            });
-        }
 
-        // Process right-to-left so mutations don't affect unprocessed nodes
-        for &(r_lo, r_hi, block) in ranges.iter().rev() {
             let ov_lo = (*start).max(r_lo);
-            let ov_hi = (*end).min(r_hi);
+            let ov_hi = cursor.min(r_hi);
+            cursor = ov_lo;
             if ov_lo >= ov_hi { continue; }
 
             let block_ranges = doc.blocks.node_ranges(block);
             let block_size = block_ranges.1 - block_ranges.0;
-            let n = ov_hi.min(block_ranges.1) - ov_lo.max(block_ranges.0);
+            let n = ov_hi - ov_lo;
 
             if ov_lo == block_ranges.0 && n >= block_size {
                 doc.blocks.delete_target(&mut doc.dot_index, Some(block));
@@ -413,6 +410,15 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                 let sp = (ov_lo - block_ranges.0) as usize;
                 doc.blocks.delete_middle_at_target(&mut doc.dot_index, block, sp, n as usize);
             }
+        }
+
+        if cursor > *start {
+            doc.dotstore.add_to_pending(dot, WireDelta {
+                op_type: OperationType::Delete,
+                ids: vec![(dot.clone(), id.clone(), *start, cursor)],
+                payload: None,
+                site: op.site,
+            });
         }
     }
 }
