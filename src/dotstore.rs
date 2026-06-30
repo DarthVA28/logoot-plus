@@ -11,7 +11,6 @@ pub struct Dot {
 
 #[derive(Clone, Debug)]
 pub struct DotStore { 
-    /* TODO: Compare Hashmap vs Ordered Tree */
     pub versions: HashMap<u32, u32>,
     pub missing: HashMap<u32, HashSet<u32>>,
     pub pending: HashMap<(u32, u32), Vec<WireDelta>>,

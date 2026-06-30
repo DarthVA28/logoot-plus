@@ -1,7 +1,7 @@
 use ahash::AHashMap as HashMap;
 use smallvec::SmallVec;
 
-type RangeList = SmallVec<[(u32, u32, usize); 2]>; // (seq_lo, seq_hi, node_idx)
+type RangeList = SmallVec<[(u32, u32, usize); 4]>; // (seq_lo, seq_hi, node_idx)
 
 #[derive(Clone, Debug)]
 pub struct DotIndex {
