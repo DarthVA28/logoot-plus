@@ -1,5 +1,3 @@
-use smallvec::SmallVec;
-
 use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, generate_base};
 use crate::node::Node;
 use crate::tree::{DelLocation, Tree};
