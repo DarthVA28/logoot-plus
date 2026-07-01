@@ -13,6 +13,7 @@ pub enum OperationType {
 pub struct Delta { 
     pub op_type: OperationType,
     pub ids: Vec<(Dot, Identifier, u32, u32)>,
+    pub origin: Option<Dot>,
     pub payload: Option<String>,
     pub site: u32,
 }
@@ -22,6 +23,7 @@ pub struct Delta {
 pub struct WireDelta {
     pub op_type: OperationType,
     pub ids: Vec<(Dot, Vec<u32>, u32, u32)>,
+    pub origin: Option<Dot>,
     pub payload: Option<String>,
     pub site: u32,
 }
@@ -33,6 +35,7 @@ impl Delta {
             ids: self.ids.iter()
                 .map(|(dot, id, lo, hi)| (dot.clone(), arena.get_slice_unchecked(*id).to_vec(), *lo, *hi))
                 .collect(),
+            origin: self.origin,
             payload: self.payload.clone(),
             site: self.site,
         }

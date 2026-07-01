@@ -1,4 +1,4 @@
-pub mod tree;
+pub mod slist;
 pub mod node;
 pub mod delta;
 pub mod state;

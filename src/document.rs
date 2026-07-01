@@ -1,6 +1,6 @@
 use crate::idarena::{IdArena, Identifier, MAX_VALUE, MIN_VALUE, generate_base};
 use crate::node::Node;
-use crate::tree::{DelLocation, Tree};
+use crate::slist::{DelLocation, Tree};
 use crate::state::State;
 use crate::delta::{Delta, OperationType, WireDelta};
 use crate::dotstore::{DotStore, Dot};
@@ -154,6 +154,14 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
     let insert_offsets = doc.blocks.node_ranges(block);
     let text_len = text.len() as u32;
     let seq = doc.state.local_clock;
+    let creator = doc.blocks.node_creator(block);
+    let block_idx = doc.blocks.node_block_idx(block);
+
+    let origin = Some(Dot {
+        site: creator, 
+        b_idx: block_idx, 
+        seq: insert_offsets.1 - 1
+    });
  
     if let Some(nxt_block) = next {
         let next_base = doc.blocks.node_base_id(nxt_block);
@@ -170,6 +178,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
                 op_type: OperationType::Insert,
                 ids: vec![(Dot{ site, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
                 payload: Some(text),
+                origin,
                 site,
             };
         }
@@ -180,7 +189,8 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
         op_type: OperationType::Insert,
         ids: vec![(Dot{ site, seq: doc.state.local_clock, b_idx: doc.blocks.node_block_idx(block) }, insert_base, insert_offsets.1, insert_offsets.1 + text_len)],
         payload: Some(text),
-        site,
+        origin,
+        site
     }
 }
 
@@ -204,6 +214,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
+            origin: None,
         };
     }
  
@@ -212,11 +223,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     let block_ranges = doc.blocks.node_ranges(block);
     let block_start = covered;
     let block_end   = block_start + doc.blocks.node_size(Some(block));
+    let block_creator = doc.blocks.node_creator(block);
  
     // ── Insert at end of block ──────────────────────────────────────────
     if pos == block_end {
         // Try extending in-place first.
-        if doc.blocks.node_creator(block) == doc.state.replica {
+        if block_creator == doc.state.replica {
             // let base_ranges = doc.blocks.node_base_offsets(block);
             // CHECK 
             if block_ranges.1 == seq {
@@ -240,13 +252,19 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         doc.state.block_idx += 1;
         let node = Node::new(text.clone(), base, seq, doc.state.replica, block_idx);
         doc.blocks.insert_after(&mut doc.dot_index, block, node);
+
+        let origin = Some(Dot {
+            site: block_creator, 
+            b_idx: doc.blocks.node_block_idx(block),
+            seq: block_ranges.1 - 1
+        });
  
         return Delta {
             op_type: OperationType::Insert,
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
-            // clock: doc.state.local_clock,
+            origin: origin,
         };
     }
  
@@ -262,6 +280,19 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         };
         let block_idx = doc.state.block_idx;
         doc.state.block_idx += 1;
+
+        // originLeft = last character of previous block, or None
+        let origin = doc.blocks.prev(block).map(|prev_block| {
+            let prev_ranges = doc.blocks.node_ranges(prev_block);
+            let prev_creator = doc.blocks.node_creator(prev_block);
+            let prev_block_idx = doc.blocks.node_block_idx(prev_block);
+            Dot {
+                site: prev_creator,
+                b_idx: prev_block_idx,
+                seq: prev_ranges.1 - 1,
+            }
+        });
+
         let node = Node::new(text.clone(), base, seq, doc.state.replica, block_idx);
         doc.blocks.insert_before(&mut doc.dot_index, block, node);
         return Delta {
@@ -269,6 +300,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
+            origin: origin,
         };
     }
  
@@ -283,6 +315,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
 
     let block_idx = doc.state.block_idx;
     doc.state.block_idx += 1;
+
+    let origin = Some(Dot {
+        site: block_creator,
+        b_idx: doc.blocks.node_block_idx(block),
+        seq: block_ranges.0 + sp - 1,
+    });
  
     let base = generate_base(&mut doc.id_arena, block_base, block_ranges.0 + sp - 1, block_base, block_ranges.0 + sp, &mut doc.state);
     let middle = Node::new(text.clone(), base, seq, doc.state.replica, block_idx);
@@ -294,6 +332,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
         payload: Some(text),
         site: doc.state.replica,
+        origin: origin,
     }
 }
 
@@ -306,7 +345,7 @@ fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
     let site = op.site;
 
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, base, offset, block_id, text.to_string())
+    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, base, offset, block_id, text.to_string(), op.origin)
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
@@ -361,6 +400,7 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
         ids: del_info,
         payload: None,
         site: doc.state.replica,
+        origin: None,
     }
 }
 
@@ -374,6 +414,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                 ids: vec![(dot.clone(), id.clone(), *start, *end)],
                 payload: None,
                 site: op.site,
+                origin: None,
             });
             continue;
         }
@@ -386,6 +427,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                     ids: vec![(dot.clone(), id.clone(), r_hi, cursor)],
                     payload: None,
                     site: op.site,
+                    origin: None,
                 });
             }
 
@@ -416,6 +458,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                 ids: vec![(dot.clone(), id.clone(), *start, cursor)],
                 payload: None,
                 site: op.site,
+                origin: None,
             });
         }
     }
