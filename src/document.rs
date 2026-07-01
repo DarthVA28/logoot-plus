@@ -49,13 +49,13 @@ impl Document {
         // println!("Inserting '{}' at pos {} at site {}", text, pos, self.state.replica);
         let op = local_insert(self, pos, text);
         if self.debug {
-            if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree(&self.id_arena);
+            if !self.blocks.check_list_sorted(&self.id_arena) {
+                self.blocks.print_list(&self.id_arena);
                 panic!("Tree structure is invalid after local insert of {} at pos {} at site {}", &op.payload.unwrap().clone(), pos, self.state.replica);
             }
         }
         // println!("After local insert at replica {}", self.state.replica);
-        // self.blocks.print_tree(&self.id_arena);
+        // self.blocks.print_list(&self.id_arena);
 
         self.dotstore.record_delta(&op);
         self.state.local_clock += text_len;
@@ -67,13 +67,13 @@ impl Document {
         // println!("Deleting from {} to {} at site {}", from, to, self.state.replica);
         let op = local_delete(self, from, to);
         if self.debug {
-            if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree(&self.id_arena);
+            if !self.blocks.check_list_sorted(&self.id_arena) {
+                self.blocks.print_list(&self.id_arena);
                 panic!("Tree structure is invalid after local delete from {} to {} at site {}", from, to, self.state.replica);
             }
         }
         // println!("After local delete at replica {}", self.state.replica);
-        // self.blocks.print_tree(&self.id_arena);
+        // self.blocks.print_list(&self.id_arena);
         self.fresh = false;
         // self.state.local_clock += 1;
         op.to_wire(&self.id_arena)
@@ -98,6 +98,7 @@ impl Document {
     }
 
     pub fn apply_op(&mut self, op: &WireDelta) {
+        // println!("Applying remote op {:?} from site {} at site {}", op, op.site, self.state.replica);
         match &op.op_type {
             OperationType::Insert => {
                 remote_insert(self, &op);
@@ -108,11 +109,15 @@ impl Document {
         }
         
         if self.debug {
-            if !self.blocks.check_tree(&self.id_arena) {
-                self.blocks.print_tree(&self.id_arena);
+            if !self.blocks.check_list_sorted(&self.id_arena) {
+                self.blocks.print_list(&self.id_arena);
                 panic!("Tree structure is invalid after merging op {:?} from site {} at site {}", op, op.site, self.state.replica);
             }
         }
+
+        // Print the tree after applying the operation
+        // println!("After applying remote op from site {} at site {}", op.site, self.state.replica);
+        // self.blocks.print_list(&self.id_arena);
 
         // Some operations can now possibly be applied!
         if op.op_type == OperationType::Insert {

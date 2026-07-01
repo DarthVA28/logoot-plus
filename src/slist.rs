@@ -5,7 +5,6 @@ use rand::{RngExt, SeedableRng};
 use crate::dotindex::DotIndex;
 use crate::idarena::{Identifier, IdArena, IdOrderingRelation};
 use crate::dotstore::Dot;
-use crate::delta::{OperationType, WireDelta};
 use crate::node::{Node, MAX_HEIGHT, HEAD, Level};
 
 pub type Path = SmallVec<[usize; 32]>;
@@ -715,37 +714,64 @@ impl Tree {
         origin_left: Dot,
     ) -> (usize, IdOrderingRelation) {
         // Try to resolve the finger
-        if let Some(finger_node) = dot_index.lookup(origin_left.site, origin_left.b_idx, origin_left.seq) {
-            // Walk right from finger_node at level 0 until we find the right spot
-            let mut curr = finger_node;
-            loop {
-                let nxt = self.nodes[curr].levels[0].next;
-                match nxt {
-                    Some(n) => {
-                        let nn = &self.nodes[n];
-                        let rel = id_arena.compare_intervals_first_raw(
-                            base, lo, hi,
-                            nn.base_id, nn.offset, nn.offset + nn.size as u32,
-                        );
-                        match rel {
-                            IdOrderingRelation::B1AfterB2
-                            | IdOrderingRelation::B1AfterB2E
-                            | IdOrderingRelation::B2ConcatB1 => {
-                                // Keep walking right
-                                curr = n;
-                            }
-                            _ => return (curr, rel),
+        let Some(finger) = dot_index.lookup(origin_left.site, origin_left.b_idx, origin_left.seq)
+        else {
+            // Finger miss (originLeft's node was deleted) — top-down fallback
+            return self.find_position_by_id(id_arena, base, lo, hi);
+        };
+ 
+        // ── Check relation with the finger node itself ──
+        //
+        // The originating site split the finger node before inserting, but
+        // this site may not have split it yet. If the new block's identifier
+        // falls INSIDE the finger node, we must return the finger's
+        // predecessor so handle_crdt_insert will split it.
+        let fn_node = &self.nodes[finger];
+        let rel_self = id_arena.compare_intervals_first_raw(
+            base, lo, hi,
+            fn_node.base_id, fn_node.offset, fn_node.offset + fn_node.size as u32,
+        );
+ 
+        match rel_self {
+            // New block is inside the finger node — needs a split
+            IdOrderingRelation::B1InsideB2
+            | IdOrderingRelation::B2InsideB1
+            | IdOrderingRelation::B1EqualsB2 => {
+                let pred = self.nodes[finger].prev.unwrap_or(HEAD);
+                return (pred, rel_self);
+            }
+            // New block is after the finger node — walk right
+            IdOrderingRelation::B1AfterB2
+            | IdOrderingRelation::B1AfterB2E
+            | IdOrderingRelation::B2ConcatB1 => { /* fall through to walk */ }
+            // Anything else is unexpected for a valid finger — fall back
+            _ => return self.find_position_by_id(id_arena, base, lo, hi),
+        }
+ 
+        // ── Walk right at level 0 ──
+        let mut curr = finger;
+        loop {
+            let nxt = self.nodes[curr].levels[0].next;
+            match nxt {
+                Some(n) => {
+                    let nn = &self.nodes[n];
+                    let rel = id_arena.compare_intervals_first_raw(
+                        base, lo, hi,
+                        nn.base_id, nn.offset, nn.offset + nn.size as u32,
+                    );
+                    match rel {
+                        IdOrderingRelation::B1AfterB2
+                        | IdOrderingRelation::B1AfterB2E
+                        | IdOrderingRelation::B2ConcatB1 => {
+                            curr = n;
                         }
-                    }
-                    None => {
-                        // End of list; insert after curr
-                        return (curr, IdOrderingRelation::B1AfterB2);
+                        _ => return (curr, rel),
                     }
                 }
+                None => {
+                    return (curr, IdOrderingRelation::B1AfterB2);
+                }
             }
-        } else {
-            // Finger miss — fall back to top-down search
-            self.find_position_by_id(id_arena, base, lo, hi)
         }
     }
  
@@ -1009,7 +1035,7 @@ impl Tree {
         self.inorder_iter().map(|n| n.content.as_str()).collect()
     }
  
-    pub fn print_tree(&self, id_arena: &IdArena) {
+    pub fn print_list(&self, id_arena: &IdArena) {
         println!("\n===== SKIP LIST =====");
         let mut curr = self.nodes[HEAD].levels[0].next;
         let mut pos = 0usize;
@@ -1040,7 +1066,7 @@ impl Tree {
     }
  
     /// Verify that all nodes are in sorted identifier order.
-    pub fn check_tree(&self, id_arena: &IdArena) -> bool {
+    pub fn check_list_sorted(&self, id_arena: &IdArena) -> bool {
         let mut prev_id: Option<Identifier> = None;
         let mut prev_offsets: Option<(u32, u32)> = None;
  
