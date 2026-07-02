@@ -991,7 +991,6 @@ impl Tree {
                     self.root = Some(succ);
                 }
                 
-                let target_size = self.nodes[curr].size;
                 self.free(curr);
                 dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
                 self.rebalance(Some(rebalance_from), None);
