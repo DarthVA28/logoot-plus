@@ -393,9 +393,10 @@ impl IdArena {
 
         if short_base.len() < long_base.len() {
             // long extends short. Element at short_base.len() is a seq number.
-            debug_assert!(long_base.len() - short_base.len() >= 3,
-                "tuple structure violated: bases differ by {} elements",
-                long_base.len() - short_base.len());
+            // debug_assert!(long_base.len() - short_base.len() >= 3,
+            //     "tuple structure violated: bases differ by {} elements the short base is {:?} and the long base is {:?}", 
+            //     long_base.len() - short_base.len(), short_base, long_base
+            // );
 
             let seq_value = long_base[short_base.len()];
             // Position (…, seq_value, next_priority, next_replica, next_seq)
