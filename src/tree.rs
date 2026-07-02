@@ -137,12 +137,7 @@ impl Tree {
             self.base_to_offsets.insert(base_id, (*lo, new_hi));
         } 
         dot_index.on_block_extended(node.creator, node.block_idx, node.offset, node.offset + node.size as u32);
-        // update everything till root 
-        let mut curr = Some(node_idx);
-        while let Some(idx) = curr {
-            self.update_node(idx);
-            curr = self.nodes[idx].parent;
-        }
+        self.propagate_size_delta(node_idx, added_size as isize);
     }
 
     pub fn truncate_content(&mut self, dot_index: &mut DotIndex, node_idx: usize, num_delete: usize, location: DelLocation) {
@@ -152,23 +147,15 @@ impl Tree {
 
         {
             let n = &mut self.nodes[node_idx];
+            debug_assert!(n.content.is_ascii(), "non-ASCII content in truncate");
             match location {
                 DelLocation::Start => {
-                    let byte_off = n.content.char_indices()
-                        .nth(num_delete)
-                        .map(|(i, _)| i)
-                        .unwrap_or(n.content.len());
-                    let kept = n.content.split_off(byte_off);
+                    let kept = n.content.split_off(num_delete);
                     n.content = kept;
                     n.offset += num_delete as u32;
                 }
                 DelLocation::End => {
-                    let keep_chars = n.size - num_delete;
-                    let byte_off = n.content.char_indices()
-                        .nth(keep_chars)
-                        .map(|(i, _)| i)
-                        .unwrap_or(n.content.len());
-                    n.content.truncate(byte_off);
+                    n.content.truncate(n.size - num_delete);
                 }
             }
             n.size -= num_delete;
@@ -180,17 +167,12 @@ impl Tree {
             let new_hi = self.nodes[node_idx].offset + self.nodes[node_idx].size as u32;
             dot_index.on_block_truncated_end(creator, self.nodes[node_idx].block_idx, old_offset, new_hi);
         }
-
-        let mut curr = Some(node_idx);
-        while let Some(idx) = curr {
-            self.update_node(idx);
-            curr = self.nodes[idx].parent;
-        }
+        self.propagate_size_delta(node_idx, -(num_delete as isize));
     }
 }
 
 /* Rotation and Rebalancing Functions */
-impl Tree {
+impl Tree {    
     #[inline(always)]
     fn update_node(&mut self, idx: usize) {
         let left = self.nodes[idx].left;
@@ -202,6 +184,18 @@ impl Tree {
         let node = &mut self.nodes[idx];
         node.height = 1 + lh.max(rh);
         node.subtree_count = node.size + lc + rc;
+    }
+
+    #[inline(always)]
+    fn propagate_size_delta(&mut self, mut node: usize, delta: isize) {
+        loop {
+            let n = &mut self.nodes[node];
+            n.subtree_count = (n.subtree_count as isize + delta) as usize;
+            match n.parent {
+                Some(p) => node = p,
+                None => break,
+            }
+        }
     }
 
     fn balance_factor(&self, node: usize) -> i32 { 
@@ -285,7 +279,7 @@ impl Tree {
     //     }
     // }
 
-    fn rebalance(&mut self, node: Option<usize>) {
+    fn rebalance(&mut self, node: Option<usize>, size_delta: Option<isize>) {
         let mut curr = match node {
             Some(idx) => idx,
             None => return,
@@ -309,11 +303,17 @@ impl Tree {
 
             // No rotation + height unchanged
             if fixed == curr && self.nodes[curr].height == old_h {
-                let mut p = par;
-                while let Some(pi) = p {
-                    self.update_node(pi);
-                    p = self.nodes[pi].parent;
+            match (par, size_delta) {
+                (Some(p), Some(delta)) => self.propagate_size_delta(p, delta),
+                (Some(p), None) => {
+                    let mut walk = Some(p);
+                    while let Some(pi) = walk {
+                        self.update_node(pi);
+                        walk = self.nodes[pi].parent;
+                    }
                 }
+                _ => {}
+            }
                 return;
             }
 
@@ -547,27 +547,20 @@ impl Tree {
                     }
                 },
                 IdOrderingRelation::B1InsideB2 => {
-                    let (sp, b_idx, from_base_id, from_offset, from_creator, mut from_content, from_block_idx) = {
+                    let (sp, from_base_id, from_offset, from_creator, mut from_content, from_block_idx) = {
                         let from_node = &self.nodes[from];
                         let f_offset = from_node.offset;
                         let from_slice = id_arena.get_slice_unchecked(from_node.base_id);
                         let sp = id_arena.find_split_point(from_slice, f_offset, f_offset + from_node.size as u32, node_base);
-                        // let sp = id_arena.find_split_point(&self.node_get_identifier_interval(from), node_idi.base);
                         let from_node = &mut self.nodes[from];
-                        let from_content_ref = &from_node.content;
-                        let b_idx = from_content_ref.char_indices()
-                            .nth(sp as usize)
-                            .map(|(idx, _)| idx)
-                            .unwrap_or(from_content_ref.len());
                         let from_content = std::mem::take(&mut from_node.content);
-                        (sp, b_idx, &from_node.base_id, from_node.offset, from_node.creator, from_content, from_node.block_idx)
+                        (sp, &from_node.base_id, from_node.offset, from_node.creator, from_content, from_node.block_idx)
                     };
 
-                    let rcontent = from_content.split_off(b_idx);
+                    let rcontent = from_content.split_off(sp as usize);
                     let right_node = Node::new(rcontent, from_base_id.clone(), from_offset + sp, from_creator, from_block_idx);
                     let right_idx = self.alloca(right_node);
 
-                    // Detach original_right BEFORE mutating from
                     let original_right = self.nodes[from].right;
 
                     let from_node = &mut self.nodes[from];
@@ -676,13 +669,8 @@ impl Tree {
                         id_arena.find_split_point(node_base, node_lo, node_hi, b2_slice)
                     };
                     let content = std::mem::take(&mut self.nodes[node].content);
-                    let byte_idx = content
-                        .char_indices()
-                        .nth(sp as usize)
-                        .map(|(i, _)| i)
-                        .unwrap_or(content.len());
-                    let left_content  = content[..byte_idx].to_string();
-                    let right_content = content[byte_idx..].to_string();
+                    let left_content  = content[..sp as usize].to_string();
+                    let right_content = content[sp as usize..].to_string();
                     
                     let id1 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo, block_idx, left_content);
                     let id2 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo + sp, block_idx, right_content);
@@ -718,7 +706,7 @@ impl Tree {
             }
         }
         if !rec {
-            self.rebalance(last);
+            self.rebalance(last, Some(len as isize));
         }
         return inserted_id;
 
@@ -726,6 +714,7 @@ impl Tree {
 
     pub fn splice(&mut self, target: usize, replacement: Option<usize>) {
         let target_node = &self.nodes[target];
+        let target_size = target_node.size;
         // let parent_idx = target_node.parent;
 
         if let Some(parent_idx) = target_node.parent {
@@ -744,7 +733,7 @@ impl Tree {
             }
 
             self.free(target);
-            self.rebalance(Some(parent_idx));
+            self.rebalance(Some(parent_idx), Some(-(target_size as isize)));
         } else {
             // Target is the root 
             self.root = replacement;
@@ -835,6 +824,7 @@ impl Tree {
     pub fn insert_after(&mut self, dot_index: &mut DotIndex, target: usize, node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
+        let new_size = n.size as isize;
         dot_index.on_block_inserted(n.creator, n.block_idx, n.offset, n.offset + n.size as u32, new_idx);
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
@@ -854,14 +844,14 @@ impl Tree {
             self.nodes[new_idx].parent = Some(curr);
             last = Some(curr);
         }
-
-        self.rebalance(last);
+        self.rebalance(last, Some(new_size));
         new_idx
     }
 
     pub fn insert_before(&mut self, dot_index: &mut DotIndex, target: usize, node: Node) -> usize {
         let new_idx = self.alloca(node);
         let n = &self.nodes[new_idx];
+        let new_size = n.size as isize;
         dot_index.on_block_inserted(n.creator, n.block_idx, n.offset, n.offset + n.size as u32, new_idx);
         self.register_base_offsets(n.base_id, n.offset, n.size as u32);
 
@@ -883,7 +873,7 @@ impl Tree {
             last = Some(curr);
         }
 
-        self.rebalance(last);
+        self.rebalance(last, Some(new_size));
         new_idx
     }
 
@@ -901,13 +891,8 @@ impl Tree {
         let target_block_idx = self.nodes[target].block_idx;
 
         let content = std::mem::take(&mut self.nodes[target].content);
-        let byte_idx = content
-            .char_indices()
-            .nth(sp)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-        let left_content  = content[..byte_idx].to_string();
-        let right_content = content[byte_idx..].to_string();
+        let left_content  = content[..sp].to_string();
+        let right_content = content[sp..].to_string();
 
         // middle_idx
         self.nodes[target].content = left_content;
@@ -933,7 +918,7 @@ impl Tree {
         self.nodes[target].right = Some(joined);
         self.nodes[joined].parent = Some(target);
 
-        self.rebalance(Some(target));  // path ends at target, NOT at right_idx
+        self.rebalance(Some(target), Some(middle_size as isize));  // path ends at target, NOT at right_idx
         middle_idx
     }
 
@@ -1005,10 +990,11 @@ impl Tree {
                 } else {
                     self.root = Some(succ);
                 }
-
+                
+                let target_size = self.nodes[curr].size;
                 self.free(curr);
                 dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
-                self.rebalance(Some(rebalance_from));
+                self.rebalance(Some(rebalance_from), None);
             }
         }
     }
@@ -1029,18 +1015,8 @@ impl Tree {
         let target_block_idx = self.nodes[target].block_idx;
 
         let content = std::mem::take(&mut self.nodes[target].content);
-
-        // Find the two byte boundaries with a single pass
-        let mut indices = content.char_indices();
-        let left_byte = indices.nth(start)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-        let mid_byte = indices.nth(count - 1)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-
-        let left_content  = content[..left_byte].to_string();
-        let right_content = content[mid_byte..].to_string();
+        let left_content  = content[..start].to_string();
+        let right_content = content[start + count..].to_string();
 
         self.nodes[target].content = left_content;
         self.nodes[target].size = start;
@@ -1060,7 +1036,7 @@ impl Tree {
         dot_index.on_block_middle_deleted(creator, target_block_idx, offset, offset+start as u32, 
             offset+ (start+count) as u32, offset + target_size as u32, right_idx);
 
-        self.rebalance(Some(target));
+        self.rebalance(Some(target), Some(-(count as isize)));
     }
 
     pub fn insert_first(&mut self, dot_index: &mut DotIndex, node: Node) -> usize {

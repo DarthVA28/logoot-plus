@@ -94,11 +94,40 @@ pub fn generate_operations_with_checks(
     generate_operations_impl(trace, check_every_txns, None)
 }
 
+fn ascii_replace_preserving_utf16(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            // Preserve UTF-16 length: BMP → 1 '?', supplementary → 2 '?'
+            for _ in 0..c.len_utf16() {
+                out.push('?');
+            }
+        }
+    }
+    out
+}
+
+fn sanitize_to_ascii(trace: &mut TraceFile) {
+    for txn in &mut trace.txns {
+        for patch in &mut txn.patches {
+            if !patch.2.is_ascii() {
+                patch.2 = ascii_replace_preserving_utf16(&patch.2);
+            }
+        }
+    }
+    if !trace.end_content.is_ascii() {
+        trace.end_content = ascii_replace_preserving_utf16(&trace.end_content);
+    }
+}
+
 fn generate_operations_impl(
-    trace: TraceFile,
+    mut trace: TraceFile,
     check_every_txns: Option<usize>,
     interested_targets: Option<&[usize]>,
 ) -> Result<GeneratedTrace, String> {
+    sanitize_to_ascii(&mut trace);
     if trace.num_agents == 0 {
         return Err("numAgents must be > 0".to_string());
     }
