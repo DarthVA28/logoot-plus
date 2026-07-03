@@ -171,6 +171,41 @@ impl Tree {
     }
 }
 
+/* Linked List Operations */
+impl Tree {
+    #[inline]
+    fn list_link_after(&mut self, existing: usize, new_idx: usize) {
+        let old_next = self.nodes[existing].list_next;
+        self.nodes[new_idx].list_prev = Some(existing);
+        self.nodes[new_idx].list_next = old_next;
+        self.nodes[existing].list_next = Some(new_idx);
+        if let Some(n) = old_next {
+            self.nodes[n].list_prev = Some(new_idx);
+        }
+    }
+
+    #[inline]
+    fn list_link_before(&mut self, existing: usize, new_idx: usize) {
+        let old_prev = self.nodes[existing].list_prev;
+        self.nodes[new_idx].list_next = Some(existing);
+        self.nodes[new_idx].list_prev = old_prev;
+        self.nodes[existing].list_prev = Some(new_idx);
+        if let Some(p) = old_prev {
+            self.nodes[p].list_next = Some(new_idx);
+        }
+    }
+
+    #[inline]
+    fn list_unlink(&mut self, idx: usize) {
+        let p = self.nodes[idx].list_prev;
+        let n = self.nodes[idx].list_next;
+        if let Some(pi) = p { self.nodes[pi].list_next = n; }
+        if let Some(ni) = n { self.nodes[ni].list_prev = p; }
+        self.nodes[idx].list_prev = None;
+        self.nodes[idx].list_next = None;
+    }
+}
+
 /* Rotation and Rebalancing Functions */
 impl Tree {    
     #[inline(always)]
@@ -327,53 +362,25 @@ impl Tree {
 }
 
 /* Inorder Predecessor and Successor Functions */
+// Replace next() and prev()
 impl Tree {
-    // Function to get inorder successor of a node
+    #[inline(always)]
     pub fn next(&self, node: usize) -> Option<usize> {
-        let nodes = &self.nodes;
-
-        // Case 1: right subtree: leftmost node
-        if let Some(mut r) = nodes[node].right {
-            while let Some(l) = nodes[r].left {
-                r = l;
-            }
-            return Some(r);
-        }
-
-        // Case 2: go up until we come from the left
-        let mut curr = node;
-        while let Some(parent) = nodes[curr].parent {
-            if nodes[parent].left == Some(curr) {
-                return Some(parent);
-            }
-            curr = parent; // Move up the tree
-        }
-        
-        None
+        self.nodes[node].list_next
     }
 
-    // Function to get inorder predecessor of a node
+    #[inline(always)]
     pub fn prev(&self, node: usize) -> Option<usize> {
-        let nodes = &self.nodes;
+        self.nodes[node].list_prev
+    }
 
-        // Case 1: left subtree: rightmost node
-        if let Some(mut l) = nodes[node].left {
-            while let Some(r) = nodes[l].right {
-                l = r;
-            }
-            return Some(l);
+    /// Leftmost node in the tree (list head).
+    fn leftmost(&self) -> Option<usize> {
+        let mut curr = self.root?;
+        while let Some(l) = self.nodes[curr].left {
+            curr = l;
         }
-
-        // Case 2: go up until we come from the right
-        let mut curr = node;
-        while let Some(parent) = nodes[curr].parent {
-            if nodes[parent].right == Some(curr) {
-                return Some(parent);
-            }
-            curr = parent; // Move up the tree
-        }
-        
-        None
+        Some(curr)
     }
 }
 
@@ -491,6 +498,7 @@ impl Tree {
                         from_node.right = Some(node);
                         self.nodes[node].parent = Some(from);
                         self.node_set_base_id(node, inserted_id);
+                        self.list_link_after(from, node);
                         dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         con = false;
                     }
@@ -510,6 +518,7 @@ impl Tree {
                         } else {
                             self.node_set_base_id(node, inserted_id);
                         }
+                        self.list_link_after(from, node);
                         dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         con = false;
                     }
@@ -530,6 +539,7 @@ impl Tree {
                         } else {
                             self.node_set_base_id(node, inserted_id);
                         }
+                        self.list_link_before(from, node); 
                         con = false;
                     }
                 },
@@ -543,6 +553,7 @@ impl Tree {
                         self.nodes[node].parent = Some(from);
                         dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         self.node_set_base_id(node, inserted_id);
+                        self.list_link_before(from, node); 
                         con = false;
                     }
                 },
@@ -575,6 +586,9 @@ impl Tree {
                     } else {
                         self.node_set_base_id(node, inserted_id);
                     }
+
+                    self.list_link_after(from, right_idx);
+                    self.list_link_after(from, node);
                     
                     let joined = self.join(Some(node), right_idx, original_right);
                     self.nodes[joined].parent = Some(from);
@@ -605,6 +619,7 @@ impl Tree {
                                 self.nodes[node].parent = Some(from);
                                 self.node_set_base_id(node, node_base_id);
                                 dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
+                                self.list_link_after(from, node); 
                                 break;
                             }
                         }
@@ -619,6 +634,7 @@ impl Tree {
                             self.nodes[node].parent = Some(from);
                             self.node_set_base_id(node, node_base_id);
                             dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
+                            self.list_link_after(from, node);
                             break;
                         }
                     }
@@ -699,6 +715,7 @@ impl Tree {
                         } else {
                             self.node_set_base_id(node, inserted_id);
                         }
+                        self.list_link_before(from, node);
                         dot_index.on_block_inserted(site, block_idx, node_lo, node_hi, node);
                         con = false;
                     }
@@ -713,6 +730,7 @@ impl Tree {
     }
 
     pub fn splice(&mut self, target: usize, replacement: Option<usize>) {
+        self.list_unlink(target);
         let target_node = &self.nodes[target];
         let target_size = target_node.size;
         // let parent_idx = target_node.parent;
@@ -844,6 +862,7 @@ impl Tree {
             self.nodes[new_idx].parent = Some(curr);
             last = Some(curr);
         }
+        self.list_link_after(target, new_idx);
         self.rebalance(last, Some(new_size));
         new_idx
     }
@@ -872,7 +891,7 @@ impl Tree {
             self.nodes[new_idx].parent = Some(curr);
             last = Some(curr);
         }
-
+        self.list_link_before(target, new_idx);
         self.rebalance(last, Some(new_size));
         new_idx
     }
@@ -914,6 +933,9 @@ impl Tree {
         dot_index.on_block_split(creator, target_block_idx, offset, offset + sp as u32, right_idx);
         dot_index.on_block_inserted(middle_creator, middle_block_idx, middle_offset, middle_offset + middle_size as u32, middle_idx);
 
+        self.list_link_after(target, right_idx);
+        self.list_link_after(target, middle_idx);
+
         let joined = self.join(Some(middle_idx), right_idx, target_right);
         self.nodes[target].right = Some(joined);
         self.nodes[joined].parent = Some(target);
@@ -952,6 +974,9 @@ impl Tree {
                 while let Some(left) = self.nodes[succ].left {
                     succ = left;
                 }
+
+                debug_assert_eq!(self.nodes[curr].list_next, Some(succ));
+                self.list_unlink(curr);
 
                 let succ_right = self.nodes[succ].right;
                 let target_parent = self.nodes[curr].parent;
@@ -1035,6 +1060,8 @@ impl Tree {
         dot_index.on_block_middle_deleted(creator, target_block_idx, offset, offset+start as u32, 
             offset+ (start+count) as u32, offset + target_size as u32, right_idx);
 
+        self.list_link_after(target, right_idx);
+
         self.rebalance(Some(target), Some(-(count as isize)));
     }
 
@@ -1048,9 +1075,9 @@ impl Tree {
     }
 }
 
+// Replace InOrderIter — no stack needed anymore
 pub struct InOrderIter<'a> {
     tree: &'a Tree,
-    stack: SmallVec<[usize; 32]>,
     current: Option<usize>,
 }
 
@@ -1058,31 +1085,18 @@ impl<'a> InOrderIter<'a> {
     pub fn new(tree: &'a Tree) -> Self {
         InOrderIter {
             tree,
-            stack: SmallVec::new(),
-            current: tree.root,
+            current: tree.leftmost(),
         }
     }
 }
 
 impl<'a> Iterator for InOrderIter<'a> {
     type Item = &'a Node;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
-        let nodes = &self.tree.nodes;
-        
-        // Go as left as possible
-        while let Some(curr_idx) = self.current {
-            self.stack.push(curr_idx);
-            self.current = nodes[curr_idx].left;
-        }
-        
-        // Pop from stack
-        let node_idx = self.stack.pop()?;
-        let node = &nodes[node_idx];
-        
-        // Move to right subtree
-        self.current = node.right;
-        
+        let idx = self.current?;
+        let node = &self.tree.nodes[idx];
+        self.current = node.list_next;
         Some(node)
     }
 }
@@ -1156,7 +1170,13 @@ impl Tree {
     }
 
     pub fn read(&self) -> String {
-        self.inorder_iter().map(|n| n.content.clone()).collect::<Vec<String>>().join("")
+        let mut res = String::with_capacity(self.tree_size());
+        let mut curr = self.leftmost();
+        while let Some(idx) = curr {
+            res.push_str(&self.nodes[idx].content);
+            curr = self.nodes[idx].list_next;
+        }
+        res
     }
 
     /* Function to check whether all the keys in the tree are sorted or not */

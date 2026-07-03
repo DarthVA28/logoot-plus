@@ -6,6 +6,8 @@ pub struct Node {
     pub left: Option<usize>, 
     pub right: Option<usize>,
     pub parent: Option<usize>,
+    pub list_next: Option<usize>,
+    pub list_prev: Option<usize>,
     pub height: i32,
     pub size: usize,
     pub subtree_count: usize, // subtree count is the number of chars in the subtree rooted at this node
@@ -22,6 +24,8 @@ impl Node {
         Node { 
             left: None, 
             right: None, 
+            list_next: None,
+            list_prev: None,
             content: content, 
             height: 1, 
             size: size, 

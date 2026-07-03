@@ -392,20 +392,13 @@ impl IdArena {
         }
 
         if short_base.len() < long_base.len() {
-            // long extends short. Element at short_base.len() is a seq number.
-            // debug_assert!(long_base.len() - short_base.len() >= 3,
-            //     "tuple structure violated: bases differ by {} elements the short base is {:?} and the long base is {:?}", 
-            //     long_base.len() - short_base.len(), short_base, long_base
-            // );
-
             let seq_value = long_base[short_base.len()];
             // Position (…, seq_value, next_priority, next_replica, next_seq)
             // falls between character at seq_value and seq_value+1 in the block.
-            // Characters [short_lo, seq_value] go left → count = seq_value + 1 - short_lo
             let chars_left = seq_value.saturating_add(1).saturating_sub(short_lo);
             chars_left.min(text_len)
         } else {
-            // short_base.len() >= long_base.len() → long is a prefix of short.
+            // short_base.len() >= long_base.len(), long is a prefix of short.
             // The long position comes before all positions in the short block.
             0
         }
