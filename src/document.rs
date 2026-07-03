@@ -154,6 +154,12 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
     let insert_offsets = doc.blocks.node_ranges(block);
     let text_len = text.len() as u32;
     let seq = doc.state.local_clock;
+
+    let origin_left = Some(Dot {
+        site: doc.blocks.node_creator(block),
+        b_idx: doc.blocks.node_block_idx(block),
+        seq: insert_offsets.1 - 1,
+    });
  
     if let Some(nxt_block) = next {
         let next_base = doc.blocks.node_base_id(nxt_block);
@@ -169,6 +175,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
             return Delta {
                 op_type: OperationType::Insert,
                 ids: vec![(Dot{ site, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
+                origin_left,
                 payload: Some(text),
                 site,
             };
@@ -179,6 +186,7 @@ fn extend_block(doc: &mut Document, text: String, block: usize, site: u32) -> De
     Delta {
         op_type: OperationType::Insert,
         ids: vec![(Dot{ site, seq: doc.state.local_clock, b_idx: doc.blocks.node_block_idx(block) }, insert_base, insert_offsets.1, insert_offsets.1 + text_len)],
+        origin_left,
         payload: Some(text),
         site,
     }
@@ -204,6 +212,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
             payload: Some(text),
             site: doc.state.replica,
+            origin_left: None,
         };
     }
  
@@ -225,8 +234,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         }
  
         // Can't extend — create a new block after this one.
-        // let id_low = IdentifierRef::new(block_base, block_ranges.1 - 1);
-        // let base;
+        let origin_left = Some(Dot {
+            site: doc.blocks.node_creator(block),
+            b_idx: doc.blocks.node_block_idx(block),
+            seq: block_ranges.1 - 1,
+        });
+
         let base = match doc.blocks.next(block) {
             Some(next_block) => {
                 let next_base   = doc.blocks.node_base_id(next_block);
@@ -245,12 +258,21 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
             op_type: OperationType::Insert,
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
             payload: Some(text),
+            origin_left,
             site: doc.state.replica,
             // clock: doc.state.local_clock,
         };
     }
  
     if pos == block_start {
+        let origin_left = doc.blocks.prev(block).map(|prev_block| {
+            let prev_ranges = doc.blocks.node_ranges(prev_block);
+            Dot {
+                site: doc.blocks.node_creator(prev_block),
+                b_idx: doc.blocks.node_block_idx(prev_block),
+                seq: prev_ranges.1 - 1,
+            }
+        });
         let base = match doc.blocks.prev(block) {
             Some(prev_block) => {
                 let prev_base   = doc.blocks.node_base_id(prev_block);
@@ -267,6 +289,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         return Delta {
             op_type: OperationType::Insert,
             ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
+            origin_left,
             payload: Some(text),
             site: doc.state.replica,
         };
@@ -281,6 +304,12 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
         block_ranges.1 - block_ranges.0
     );
 
+    let origin_left = Some(Dot {
+        site: doc.blocks.node_creator(block),
+        b_idx: doc.blocks.node_block_idx(block),
+        seq: block_ranges.0 + sp - 1,
+    });
+
     let block_idx = doc.state.block_idx;
     doc.state.block_idx += 1;
  
@@ -292,6 +321,7 @@ fn local_insert(doc: &mut Document, pos: usize, text: String) -> Delta {
     Delta {
         op_type: OperationType::Insert,
         ids: vec![(Dot{ site: doc.state.replica, seq: doc.state.local_clock, b_idx: block_idx }, base, seq, seq + text_len)],
+        origin_left,
         payload: Some(text),
         site: doc.state.replica,
     }
@@ -306,7 +336,7 @@ fn remote_insert(doc: &mut Document, op: &WireDelta) -> Identifier {
     let site = op.site;
 
     // Find and insert this id 
-    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, base, offset, block_id, text.to_string())
+    doc.blocks.insert_by_id(site, &mut doc.id_arena, &mut doc.dot_index, base, offset, block_id, text.to_string(), op.origin_left)
 }
 
 fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
@@ -359,6 +389,7 @@ fn local_delete(doc: &mut Document, from: usize, to: usize) -> Delta {
     Delta {
         op_type: OperationType::Delete,
         ids: del_info,
+        origin_left: None,
         payload: None,
         site: doc.state.replica,
     }
@@ -372,6 +403,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
             doc.dotstore.add_to_pending(dot, WireDelta {
                 op_type: OperationType::Delete,
                 ids: vec![(dot.clone(), id.clone(), *start, *end)],
+                origin_left: None,
                 payload: None,
                 site: op.site,
             });
@@ -384,6 +416,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
                 doc.dotstore.add_to_pending(dot, WireDelta {
                     op_type: OperationType::Delete,
                     ids: vec![(dot.clone(), id.clone(), r_hi, cursor)],
+                    origin_left: None,
                     payload: None,
                     site: op.site,
                 });
@@ -414,6 +447,7 @@ fn remote_delete(doc: &mut Document, op: &WireDelta) {
             doc.dotstore.add_to_pending(dot, WireDelta {
                 op_type: OperationType::Delete,
                 ids: vec![(dot.clone(), id.clone(), *start, cursor)],
+                origin_left: None,
                 payload: None,
                 site: op.site,
             });

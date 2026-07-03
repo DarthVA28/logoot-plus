@@ -2,6 +2,7 @@ use core::panic;
 use std::cmp::Ordering;
 use ahash::AHashMap as HashMap;
 use crate::dotindex::DotIndex;
+use crate::dotstore::Dot;
 use crate::node::Node;
 use crate::idarena::{Identifier, IdOrderingRelation, IdArena};
 use smallvec::SmallVec;
@@ -296,24 +297,6 @@ impl Tree {
         }
     }
 
-    // fn rebalance(&mut self, node: Option<usize>) {
-    //     let mut curr = node;
-    //     while let Some(idx) = curr {
-    //         let par = self.nodes[idx].parent;
-    //         let fixed = self.avl_fix(idx);
-    //         if let Some(parent) = self.nodes[fixed].parent {
-    //             if self.nodes[parent].left == Some(idx) {
-    //                 self.nodes[parent].left = Some(fixed);
-    //             } else {
-    //                 self.nodes[parent].right = Some(fixed);
-    //             }
-    //         } else {
-    //             self.root = Some(fixed);
-    //         }
-    //         curr = par;
-    //     }
-    // }
-
     fn rebalance(&mut self, node: Option<usize>, size_delta: Option<isize>) {
         let mut curr = match node {
             Some(idx) => idx,
@@ -451,8 +434,36 @@ impl Tree {
 
     /// Insert the node by identifier  
     /// Return the interned identifier
-    pub fn insert_by_id(&mut self, site: u32, id_arena: &mut IdArena, dot_index: &mut DotIndex, base: &[u32], offset: u32, block_idx: u32, content: String) -> Identifier {
+    pub fn insert_by_id(&mut self, 
+        site: u32, 
+        id_arena: &mut IdArena, 
+        dot_index: &mut DotIndex, 
+        base: &[u32], 
+        offset: u32, 
+        block_idx: u32, 
+        content: String, 
+        origin_left: Option<Dot>
+    ) -> Identifier {
         let len = content.len() as u32;
+
+        // Try finger-based insertion first
+        if let Some(origin) = origin_left {
+            if let Some(finger_node) = dot_index.lookup(origin.site, origin.b_idx, origin.seq) {
+                let base_id = self.insert_by_finger(
+                    site, id_arena, dot_index,
+                    finger_node, origin.seq,
+                    base, offset, block_idx, content,
+                );
+                if let Some((lo, hi)) = self.base_to_offsets.get(&base_id) {
+                    let new_hi = std::cmp::max(*hi, offset + len);
+                    self.base_to_offsets.insert(base_id, (*lo, new_hi));
+                } else {
+                    self.base_to_offsets.insert(base_id, (offset, offset + len));
+                }
+                return base_id;
+            }
+        }
+
         let idx = self.alloca(Node::new(content, Identifier::EMPTY, offset, site, block_idx));
         if self.is_empty() {
             let base_id = id_arena.intern(base);
@@ -688,8 +699,9 @@ impl Tree {
                     let left_content  = content[..sp as usize].to_string();
                     let right_content = content[sp as usize..].to_string();
                     
-                    let id1 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo, block_idx, left_content);
-                    let id2 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo + sp, block_idx, right_content);
+                    // FIXME!!
+                    let id1 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo, block_idx, left_content, None);
+                    let id2 = self.insert_by_id(site, id_arena, dot_index, node_base, node_lo + sp, block_idx, right_content, None);
 
                     // id1 and id2 should be equal 
                     debug_assert_eq!(id1, id2);
@@ -726,7 +738,148 @@ impl Tree {
             self.rebalance(last, Some(len as isize));
         }
         return inserted_id;
+    }
 
+    pub fn insert_by_finger(
+        &mut self,
+        site: u32,
+        id_arena: &mut IdArena,
+        dot_index: &mut DotIndex,
+        finger: usize,
+        finger_seq: u32,
+        base: &[u32],
+        offset: u32,
+        block_idx: u32,
+        content: String,
+    ) -> Identifier {
+        let len = content.len() as u32;
+        let (f_lo, f_hi) = self.node_ranges(finger);
+        debug_assert!(
+            finger_seq >= f_lo && finger_seq < f_hi,
+            "finger node does not contain origin seq"
+        );
+
+        // If origin points mid-fragment, split the finger first so that
+        // the walk starts at the right boundary.
+        let prev = if finger_seq < f_hi - 1 {
+            let sp = (finger_seq + 1 - f_lo) as usize;
+            let base_id = self.nodes[finger].base_id;
+            let f_offset = self.nodes[finger].offset;
+            let creator = self.nodes[finger].creator;
+            let f_block_idx = self.nodes[finger].block_idx;
+            let target_right = self.nodes[finger].right;
+
+            let full_content = std::mem::take(&mut self.nodes[finger].content);
+            let left_content = full_content[..sp].to_string();
+            let right_content = full_content[sp..].to_string();
+
+            self.nodes[finger].content = left_content;
+            self.nodes[finger].size = sp;
+
+            let right_node = Node::new(right_content, base_id, f_offset + sp as u32, creator, f_block_idx);
+            let right_idx = self.alloca(right_node);
+
+            dot_index.on_block_split(creator, f_block_idx, f_offset, f_offset + sp as u32, right_idx);
+            self.list_link_after(finger, right_idx);
+
+            let joined = self.join(None, right_idx, target_right);
+            self.nodes[finger].right = Some(joined);
+            self.nodes[joined].parent = Some(finger);
+
+            self.rebalance(Some(finger), None);
+            finger
+        } else {
+            finger
+        };
+
+        // ── Walk right comparing IDs ───────────────────────────────────
+        let mut prev = prev;
+        let mut resolved: Option<Identifier> = None;
+
+        loop {
+            let cand = match self.nodes[prev].list_next {
+                Some(c) => c,
+                None => break,
+            };
+
+            let rel = {
+                let c = &self.nodes[cand];
+                id_arena.compare_intervals_first_raw(
+                    base, offset, offset + len,
+                    c.base_id, c.offset, c.offset + c.size as u32,
+                )
+            };
+
+            match rel {
+                IdOrderingRelation::B1AfterB2 => {
+                    prev = cand;
+                }
+                IdOrderingRelation::B1AfterB2E => {
+                    resolved = Some(self.nodes[cand].base_id);
+                    prev = cand;
+                }
+                IdOrderingRelation::B2ConcatB1 => {
+                    resolved = Some(self.nodes[cand].base_id);
+                    let same_block = self.nodes[cand].creator == site
+                        && self.nodes[cand].block_idx == block_idx;
+                    let overlaps_existing = self
+                        .base_id_max_offset(self.nodes[cand].base_id)
+                        .map_or(false, |hi| offset < hi);
+
+                    if same_block && !overlaps_existing {
+                        let fits = match self.nodes[cand].list_next {
+                            None => true,
+                            Some(nxt) => {
+                                let n_base = self.nodes[nxt].base_id;
+                                let n_lo = self.nodes[nxt].offset;
+                                id_arena.num_insertable(
+                                    self.nodes[cand].base_id, offset,
+                                    n_base, n_lo, len,
+                                ) >= len
+                            }
+                        };
+                        if fits {
+                            self.extend_content(dot_index, cand, &content);
+                            return self.nodes[cand].base_id;
+                        }
+                    }
+                    prev = cand;
+                }
+                IdOrderingRelation::B1BeforeB2
+                | IdOrderingRelation::B1ConcatB2 => break,
+                IdOrderingRelation::B1BeforeB2E => {
+                    resolved = Some(self.nodes[cand].base_id);
+                    break;
+                }
+                IdOrderingRelation::B1InsideB2 => {
+                    let sp = {
+                        let c = &self.nodes[cand];
+                        let c_slice = id_arena.get_slice_unchecked(c.base_id);
+                        id_arena.find_split_point(
+                            c_slice, c.offset, c.offset + c.size as u32, base,
+                        )
+                    };
+                    let base_id = resolved.unwrap_or_else(|| id_arena.intern(base));
+                    let middle = Node::new(content, base_id, offset, site, block_idx);
+                    self.split_and_insert_middle(dot_index, cand, sp as usize, middle);
+                    return base_id;
+                }
+                IdOrderingRelation::B1EqualsB2 => {
+                    return self.nodes[cand].base_id;
+                }
+                IdOrderingRelation::B2InsideB1 => {
+                    return self.insert_by_id(
+                        site, id_arena, dot_index, base, offset, block_idx, content, None,
+                    );
+                }
+            }
+        }
+
+        // Insert between prev and prev.list_next
+        let base_id = resolved.unwrap_or_else(|| id_arena.intern(base));
+        let node = Node::new(content, base_id, offset, site, block_idx);
+        self.insert_after(dot_index, prev, node);
+        base_id
     }
 
     pub fn splice(&mut self, target: usize, replacement: Option<usize>) {
@@ -919,7 +1072,6 @@ impl Tree {
 
         let right_node = Node::new(right_content, base_id, offset + sp as u32, creator, target_block_idx);
         let right_idx = self.alloca(right_node);
-
         
         let middle_creator = middle.creator;    
         let middle_base   = middle.base_id;
@@ -969,12 +1121,7 @@ impl Tree {
                 dot_index.on_block_deleted(target_creator, target_block_idx, target_offset);
             }
             (Some(l), Some(r)) => {
-                // Find in-order successor (leftmost in right subtree)
-                let mut succ = r;
-                while let Some(left) = self.nodes[succ].left {
-                    succ = left;
-                }
-
+                let succ = self.nodes[curr].list_next.unwrap();
                 debug_assert_eq!(self.nodes[curr].list_next, Some(succ));
                 self.list_unlink(curr);
 
