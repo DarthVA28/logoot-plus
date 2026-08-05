@@ -1,25 +1,26 @@
 //! Local-side benchmarking for logoot-plus (choice-B semantics).
 //!
-//! All agents are timed in a single replay pass. N runs = N replays total
-//! (not N × agents). Per-agent timings are bucketed separately.
+//! Uses the same inbox-based Network model and causal-sync logic as
+//! `trace_bench.rs`: ops are queued in per-agent inboxes via
+//! `network.broadcast()`, and before each txn the sender's replica is
+//! brought up to the full causal frontier via `network.sync_from()` for
+//! every ancestor agent. This ensures DLS sees ops in the correct causal
+//! order — matching how `trace_bench` does it.
 //!
-//! For each txn (in topological order):
-//!   1. Apply patches on `docs[txn.agent]`, TIMED.
-//!   2. Broadcast resulting WireDelta(s) to every other doc, UNTIMED.
+//! All agents are timed in a single replay pass. N runs = N replays total.
 //!
-//! Untimed: ASCII sanitisation (once up front), bounds check, utf16 fallback,
-//! `ins` payload clone, and broadcast to peers.
-//!
-//! Use `--target-agent N` to filter output to one agent (all are still timed).
-//! Default: report all agents.
+//! Timed: only `doc.ins()` / `doc.del()` calls.
+//! Untimed: ASCII sanitisation, bounds check, utf16 fallback, ins payload
+//! clone, inbox broadcast, and causal sync (apply_remote_op via sync_from).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use logoot_plus::document::Document;
+use logoot_plus::network::Network;
 use logoot_plus::trace_bench::{Patch, TraceFile, load_trace_file};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,13 +108,9 @@ fn sanitize_to_ascii(trace: &mut TraceFile) {
 // ---- Per-agent sample collector ------------------------------------------
 
 struct AgentSamples {
-    /// Per-op ns samples for this agent.
     samples: Vec<u128>,
-    /// Running total ns for the current txn (used for per-txn aggregation).
     txn_ns: u128,
-    /// Index into `samples` at the start of the current txn.
     txn_start: usize,
-    /// Total ops attributed to this agent.
     op_count: usize,
 }
 
@@ -131,12 +128,34 @@ impl AgentSamples {
         self.op_count += 1;
     }
     fn end_txn_per_txn(&mut self) {
-        // Collapse this txn's per-op samples into a single per-txn sample.
         self.samples.truncate(self.txn_start);
         if self.txn_ns > 0 {
             self.samples.push(self.txn_ns);
         }
     }
+}
+
+// ---- Causal ancestor map (same logic as trace_bench) ---------------------
+
+fn ancestor_agents_for_txn(trace: &TraceFile, txn_idx: usize) -> Vec<usize> {
+    let mut seen_txns = vec![false; trace.txns.len()];
+    let mut stack = trace.txns[txn_idx].parents.clone();
+    let mut agents = BTreeSet::<usize>::new();
+
+    while let Some(parent_idx) = stack.pop() {
+        if seen_txns[parent_idx] {
+            continue;
+        }
+        seen_txns[parent_idx] = true;
+
+        let parent_txn = &trace.txns[parent_idx];
+        agents.insert(parent_txn.agent);
+        for ancestor in &parent_txn.parents {
+            stack.push(*ancestor);
+        }
+    }
+
+    agents.into_iter().collect()
 }
 
 // -------------------------------------------------------------------------
@@ -192,9 +211,17 @@ fn main() {
         sched_started.elapsed().as_secs_f64()
     );
 
+    // Precompute the ancestor agent set for every txn — same as trace_bench.
+    eprintln!("[run] precomputing ancestor map...");
+    let anc_started = Instant::now();
+    let ancestor_map: Vec<Vec<usize>> = (0..trace.txns.len())
+        .map(|i| ancestor_agents_for_txn(&trace, i))
+        .collect();
+    eprintln!("[run] ancestor map built in {:.2}s", anc_started.elapsed().as_secs_f64());
+
     eprintln!("[run] replaying (all agents timed in one pass)...");
     let replay_started = Instant::now();
-    let outcome = match replay(&trace, &order, config.mode) {
+    let outcome = match replay(&trace, &order, &ancestor_map, config.mode) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{e}");
@@ -210,7 +237,6 @@ fn main() {
         eprintln!("[warn] did not converge to endContent (check skipped for now)");
     }
 
-    // Build per-agent output records.
     let report_agents: Vec<usize> = match config.target_agent {
         Some(t) => vec![t],
         None => (0..trace.num_agents).collect(),
@@ -245,6 +271,38 @@ fn main() {
             total_replay_ms,
             stats,
             samples_ns,
+            content_check: outcome.content_check.clone(),
+        });
+    }
+
+    // Summary record: sum across all reported agents.
+    {
+        let mut all_samples: Vec<u128> = Vec::new();
+        let mut all_ops = 0usize;
+        for agent in &report_agents {
+            let ad = &outcome.agent_samples[*agent];
+            all_samples.extend_from_slice(&ad.samples);
+            all_ops += ad.op_count;
+        }
+        let stats = compute_stats(&all_samples);
+
+        eprintln!(
+            "  ALL AGENTS ops={} total={:.4}ms median={:.4}ms",
+            all_ops, stats.total_ms, stats.median_ms,
+        );
+
+        records.push(OutputRecord {
+            trace_path: config.input.display().to_string(),
+            crdt: "dls",
+            mode: mode_name(config.mode).to_string(),
+            trace_kind: trace.kind.clone(),
+            num_agents: trace.num_agents,
+            target_agent: usize::MAX,
+            num_txns: trace.txns.len(),
+            op_count: all_ops,
+            total_replay_ms,
+            stats,
+            samples_ns: None,
             content_check: outcome.content_check.clone(),
         });
     }
@@ -284,6 +342,7 @@ struct ReplayOutcome {
 fn replay(
     trace: &TraceFile,
     order: &[usize],
+    ancestor_map: &[Vec<usize>],
     mode: Mode,
 ) -> Result<ReplayOutcome, String> {
     let n = trace.num_agents;
@@ -291,13 +350,10 @@ fn replay(
         return Err("numAgents must be > 0".to_string());
     }
 
-    let mut docs: Vec<Document> = (0..n)
-        .map(|i| {
-            let mut d = Document::new(i as u32);
-            d.set_replica(i as u32);
-            d
-        })
-        .collect();
+    // Build the Network with one Document per agent — same as
+    // LogootSplitSystem::new() does internally.
+    let docs: Vec<Document> = (0..n as u32).map(Document::new).collect();
+    let mut network = Network::new(docs);
 
     let mut agent_samples: Vec<AgentSamples> = (0..n).map(|_| AgentSamples::new()).collect();
 
@@ -310,25 +366,41 @@ fn replay(
             ));
         }
 
-        let acting = txn.agent;
-        agent_samples[acting].begin_txn();
+        let sender = txn.agent;
+        let sender_u32 = sender as u32;
+
+        // ---- Causal sync (untimed) ----
+        // Before the sender edits, bring its replica up to the full causal
+        // frontier by draining inboxes from every ancestor agent. This is
+        // the same logic as trace_bench lines 181-192.
+        for &anc_agent in &ancestor_map[txn_idx] {
+            if anc_agent != sender {
+                network.sync_from(sender_u32, anc_agent as u32);
+            }
+        }
+
+        // ---- Apply patches (timed) ----
+        agent_samples[sender].begin_txn();
 
         for patch in &txn.patches {
             apply_patch_timed(
-                &mut docs,
-                acting,
+                &mut network,
+                sender,
                 txn_idx,
                 patch,
-                &mut agent_samples[acting],
+                &mut agent_samples[sender],
             )?;
         }
 
         if mode == Mode::PerTxn {
-            agent_samples[acting].end_txn_per_txn();
+            agent_samples[sender].end_txn_per_txn();
         }
     }
 
-    let observed = docs[0].read();
+    // Final sync — drain all remaining inboxes so every replica converges.
+    network.sync_all();
+
+    let observed = network.documents[0].read();
     let matches = observed == trace.end_content;
     Ok(ReplayOutcome {
         agent_samples,
@@ -340,26 +412,30 @@ fn replay(
     })
 }
 
-/// Apply a single patch on `acting`'s document, TIMED, and broadcast to
-/// every other document (untimed).
+/// Apply a single patch on `sender`'s document (timed), then broadcast the
+/// resulting WireDelta into every other agent's inbox (untimed — the ops
+/// sit in the inbox until a future `sync_from` drains them).
 fn apply_patch_timed(
-    docs: &mut [Document],
-    acting: usize,
+    network: &mut Network,
+    sender: usize,
     txn_idx: usize,
     patch: &Patch,
     samples: &mut AgentSamples,
 ) -> Result<(), String> {
+    let sender_u32 = sender as u32;
+    let sender_idx = network.index_of(sender_u32);
+
     let pos_utf16 = patch.0;
     let del_len_utf16 = patch.1;
     let ins = &patch.2;
 
     let mut pos = pos_utf16;
     let mut del_len = del_len_utf16;
-    let doc_size_before = docs[acting].blocks.tree_size();
+    let doc_size_before = network.documents[sender_idx].blocks.tree_size();
     let mut to = pos.saturating_add(del_len);
     let mut converted_from_utf16 = false;
     if pos > doc_size_before || to > doc_size_before {
-        let content = docs[acting].read();
+        let content = network.documents[sender_idx].read();
         let from = utf16_to_char_index(&content, pos_utf16);
         let conv_to = utf16_to_char_index(&content, pos_utf16.saturating_add(del_len_utf16));
         pos = from;
@@ -371,32 +447,28 @@ fn apply_patch_timed(
     if del_len > 0 {
         if pos > doc_size_before || to > doc_size_before {
             return Err(format!(
-                "invalid delete range in txn {}: {}..{} while doc size is {} (raw utf16 {}..{}, utf16_conversion_attempted={})",
-                txn_idx, pos, to, doc_size_before,
+                "invalid delete range in txn {} (agent={}): {}..{} while doc size is {} \
+                 (raw utf16 {}..{}, utf16_conversion_attempted={})",
+                txn_idx, sender, pos, to, doc_size_before,
                 pos_utf16, pos_utf16.saturating_add(del_len_utf16), converted_from_utf16
             ));
         }
         let start = Instant::now();
-        let op = docs[acting].del(pos, to);
+        let op = network.documents[sender_idx].del(pos, to);
         samples.record(start.elapsed().as_nanos());
 
-        for (i, other) in docs.iter_mut().enumerate() {
-            if i == acting { continue; }
-            other.apply_remote_op(&op);
-        }
+        // Queue in inboxes (untimed). Will be applied by a future sync_from.
+        network.broadcast(op, sender_u32);
     }
 
     if !ins.is_empty() {
-        let text = ins.clone();
+        let text = ins.clone(); // outside timer
         let start = Instant::now();
-        let op = docs[acting].ins(pos, text);
+        let op = network.documents[sender_idx].ins(pos, text);
         samples.record(start.elapsed().as_nanos());
 
         if let Some(op) = op {
-            for (i, other) in docs.iter_mut().enumerate() {
-                if i == acting { continue; }
-                other.apply_remote_op(&op);
-            }
+            network.broadcast(op, sender_u32);
         }
     }
 
