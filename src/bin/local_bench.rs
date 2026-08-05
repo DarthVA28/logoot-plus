@@ -1,27 +1,17 @@
 //! Local-side benchmarking for logoot-plus (choice-B semantics).
 //!
-//! Measures the CPU cost of the sender-side `Document::ins` / `Document::del`
-//! calls on the *target agent's* document as the trace is replayed with real
-//! multi-agent CRDT semantics. One `Document` per agent; every `WireDelta`
-//! produced by `ins`/`del` is broadcast (untimed) to every other document via
-//! `Document::apply_remote_op`. This matches the "choice B" convention used
-//! by the local-bench harness for Yjs, Yrs, and Automerge, so the reported
-//! timings are directly comparable.
+//! All agents are timed in a single replay pass. N runs = N replays total
+//! (not N × agents). Per-agent timings are bucketed separately.
 //!
-//! Two granularities are supported:
+//! For each txn (in topological order):
+//!   1. Apply patches on `docs[txn.agent]`, TIMED.
+//!   2. Broadcast resulting WireDelta(s) to every other doc, UNTIMED.
 //!
-//! * `per-op`  — one sample per `ins` or `del` call on the target doc.
-//! * `per-txn` — one sample per transaction on the target doc, equal to the
-//!               sum of the ins/del call times for that transaction.
+//! Untimed: ASCII sanitisation (once up front), bounds check, utf16 fallback,
+//! `ins` payload clone, and broadcast to peers.
 //!
-//! Untimed on every apply: ASCII sanitisation (done once up front), bounds
-//! check, utf16 fallback, `ins` payload clone, and (for every agent, including
-//! target) the remote broadcast to peers.
-//!
-//! Use `--target-agent N` (default 0) or `--all-agents` to sweep every agent.
-//!
-//! The endContent equality check is reported but does NOT fail the run — it's
-//! logged as a warning so timing numbers still get written even on divergence.
+//! Use `--target-agent N` to filter output to one agent (all are still timed).
+//! Default: report all agents.
 
 use std::collections::VecDeque;
 use std::env;
@@ -39,18 +29,12 @@ enum Mode {
 }
 
 #[derive(Clone, Debug)]
-enum TargetSpec {
-    Agent(usize),
-    AllAgents,
-}
-
-#[derive(Clone, Debug)]
 struct Config {
     input: PathBuf,
     mode: Mode,
     output: PathBuf,
     include_samples: bool,
-    target: TargetSpec,
+    target_agent: Option<usize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -92,12 +76,6 @@ struct OutputRecord {
 }
 
 // ---- ASCII sanitisation --------------------------------------------------
-// Mirrors `trace_bench::sanitize_to_ascii` (which isn't `pub`, so we
-// reimplement here to keep this binary self-contained). Every non-ASCII char
-// is replaced by 1 or 2 '?'s depending on its UTF-16 length, so byte length,
-// char length, and UTF-16 length all coincide. This makes the JSON-recorded
-// UTF-16 positions safe to feed straight into DLS's char-indexed API without
-// hitting mid-codepoint slices in `tree.rs`.
 
 fn ascii_replace_preserving_utf16(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -123,6 +101,41 @@ fn sanitize_to_ascii(trace: &mut TraceFile) {
     }
     if !trace.end_content.is_ascii() {
         trace.end_content = ascii_replace_preserving_utf16(&trace.end_content);
+    }
+}
+
+// ---- Per-agent sample collector ------------------------------------------
+
+struct AgentSamples {
+    /// Per-op ns samples for this agent.
+    samples: Vec<u128>,
+    /// Running total ns for the current txn (used for per-txn aggregation).
+    txn_ns: u128,
+    /// Index into `samples` at the start of the current txn.
+    txn_start: usize,
+    /// Total ops attributed to this agent.
+    op_count: usize,
+}
+
+impl AgentSamples {
+    fn new() -> Self {
+        AgentSamples { samples: Vec::new(), txn_ns: 0, txn_start: 0, op_count: 0 }
+    }
+    fn begin_txn(&mut self) {
+        self.txn_start = self.samples.len();
+        self.txn_ns = 0;
+    }
+    fn record(&mut self, ns: u128) {
+        self.samples.push(ns);
+        self.txn_ns += ns;
+        self.op_count += 1;
+    }
+    fn end_txn_per_txn(&mut self) {
+        // Collapse this txn's per-op samples into a single per-txn sample.
+        self.samples.truncate(self.txn_start);
+        if self.txn_ns > 0 {
+            self.samples.push(self.txn_ns);
+        }
     }
 }
 
@@ -157,6 +170,13 @@ fn main() {
         trace.txns.len()
     );
 
+    if let Some(t) = config.target_agent {
+        if t >= trace.num_agents {
+            eprintln!("target agent {} out of range (trace has {} agents)", t, trace.num_agents);
+            std::process::exit(1);
+        }
+    }
+
     eprintln!("[run] mode={} scheduling...", mode_name(config.mode));
     let sched_started = Instant::now();
     let order = match schedule_txns(&trace) {
@@ -172,61 +192,43 @@ fn main() {
         sched_started.elapsed().as_secs_f64()
     );
 
-    // Build the targets list as a pure expression, then range-check separately.
-    // (Mixing `exit(1)` and a value tail inside the same match arm confuses
-    // rust-analyzer's inference; splitting is easier than fighting it.)
-    let targets: Vec<usize> = match &config.target {
-        TargetSpec::Agent(a) => vec![*a],
-        TargetSpec::AllAgents => (0..trace.num_agents).collect(),
-    };
-    for &t in &targets {
-        if t >= trace.num_agents {
-            eprintln!(
-                "target agent {} out of range (trace has {} agents)",
-                t, trace.num_agents
-            );
+    eprintln!("[run] replaying (all agents timed in one pass)...");
+    let replay_started = Instant::now();
+    let outcome = match replay(&trace, &order, config.mode) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
             std::process::exit(1);
         }
+    };
+    let total_replay_ns = replay_started.elapsed().as_nanos();
+    let total_replay_ms = (total_replay_ns as f64) / 1_000_000.0;
+
+    eprintln!("[done] total_replay={:.3}s matches={}", total_replay_ms / 1000.0, outcome.content_check.matches);
+
+    if !outcome.content_check.matches {
+        eprintln!("[warn] did not converge to endContent (check skipped for now)");
     }
 
-    let mut records: Vec<OutputRecord> = Vec::with_capacity(targets.len());
-    for target in targets {
-        eprintln!("[run] target_agent={target}");
-        let replay_started = Instant::now();
-        let outcome = match replay(&trace, &order, config.mode, target) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        };
-        let total_replay_ns = replay_started.elapsed().as_nanos();
-        let total_replay_ms = (total_replay_ns as f64) / 1_000_000.0;
+    // Build per-agent output records.
+    let report_agents: Vec<usize> = match config.target_agent {
+        Some(t) => vec![t],
+        None => (0..trace.num_agents).collect(),
+    };
 
-        let stats = compute_stats(&outcome.samples_ns);
+    let mut records: Vec<OutputRecord> = Vec::with_capacity(report_agents.len());
+    for agent in &report_agents {
+        let agent = *agent;
+        let agent_data = &outcome.agent_samples[agent];
+        let stats = compute_stats(&agent_data.samples);
+
         eprintln!(
-            "[done] target={} samples={} total_replay={:.3}s min={:.4}ms median={:.4}ms mean={:.4}ms p95={:.4}ms p99={:.4}ms max={:.4}ms matches={}",
-            target,
-            stats.count,
-            (total_replay_ns as f64) / 1e9,
-            stats.min_ms,
-            stats.median_ms,
-            stats.mean_ms,
-            stats.p95_ms,
-            stats.p99_ms,
-            stats.max_ms,
-            outcome.content_check.matches,
+            "  agent={} ops={} total={:.4}ms median={:.4}ms",
+            agent, agent_data.op_count, stats.total_ms, stats.median_ms,
         );
 
-        // if !outcome.content_check.matches {
-        //     eprintln!(
-        //         "[warn] target {} did not converge to endContent (check skipped for now)",
-        //         target
-        //     );
-        // }
-
         let samples_ns = if config.include_samples {
-            Some(outcome.samples_ns)
+            Some(agent_data.samples.clone())
         } else {
             None
         };
@@ -237,13 +239,13 @@ fn main() {
             mode: mode_name(config.mode).to_string(),
             trace_kind: trace.kind.clone(),
             num_agents: trace.num_agents,
-            target_agent: target,
+            target_agent: agent,
             num_txns: trace.txns.len(),
-            op_count: outcome.op_count,
+            op_count: agent_data.op_count,
             total_replay_ms,
             stats,
             samples_ns,
-            content_check: outcome.content_check,
+            content_check: outcome.content_check.clone(),
         });
     }
 
@@ -255,9 +257,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Single target -> one JSON object (preserves the pre-change on-disk
-    // shape for existing analysis scripts). All-agents -> JSON array of
-    // objects.
     let bytes = if records.len() == 1 {
         serde_json::to_vec_pretty(&records[0])
     } else {
@@ -278,8 +277,7 @@ fn main() {
 }
 
 struct ReplayOutcome {
-    samples_ns: Vec<u128>,
-    op_count: usize,
+    agent_samples: Vec<AgentSamples>,
     content_check: ContentCheck,
 }
 
@@ -287,21 +285,12 @@ fn replay(
     trace: &TraceFile,
     order: &[usize],
     mode: Mode,
-    target: usize,
 ) -> Result<ReplayOutcome, String> {
     let n = trace.num_agents;
     if n == 0 {
         return Err("numAgents must be > 0".to_string());
     }
-    if target >= n {
-        return Err(format!(
-            "target agent {} out of range (numAgents={})",
-            target, n
-        ));
-    }
 
-    // One Document per agent. Each doc's replica id is fixed to its agent
-    // index so identifiers carry the declared site id throughout the run.
     let mut docs: Vec<Document> = (0..n)
         .map(|i| {
             let mut d = Document::new(i as u32);
@@ -310,8 +299,7 @@ fn replay(
         })
         .collect();
 
-    let mut samples = Vec::<u128>::new();
-    let mut op_count = 0usize;
+    let mut agent_samples: Vec<AgentSamples> = (0..n).map(|_| AgentSamples::new()).collect();
 
     for &txn_idx in order {
         let txn = &trace.txns[txn_idx];
@@ -323,37 +311,27 @@ fn replay(
         }
 
         let acting = txn.agent;
-        let n_before_txn = samples.len();
-        let mut txn_ns = 0u128;
+        agent_samples[acting].begin_txn();
 
         for patch in &txn.patches {
-            txn_ns += apply_patch_timed(
+            apply_patch_timed(
                 &mut docs,
                 acting,
-                target,
                 txn_idx,
                 patch,
-                &mut samples,
+                &mut agent_samples[acting],
             )?;
         }
 
-        let ops_in_txn = samples.len() - n_before_txn;
-        op_count += ops_in_txn;
-
-        if mode == Mode::PerTxn && acting == target {
-            // Replace this txn's per-op samples with a single per-txn sample
-            // equal to the sum of its ins/del times. Only meaningful for the
-            // target agent (only agent whose ops get sampled).
-            samples.truncate(n_before_txn);
-            samples.push(txn_ns);
+        if mode == Mode::PerTxn {
+            agent_samples[acting].end_txn_per_txn();
         }
     }
 
-    let observed = docs[target].read();
+    let observed = docs[0].read();
     let matches = observed == trace.end_content;
     Ok(ReplayOutcome {
-        samples_ns: samples,
-        op_count,
+        agent_samples,
         content_check: ContentCheck {
             expected: trace.end_content.clone(),
             observed,
@@ -362,20 +340,15 @@ fn replay(
     })
 }
 
-/// Apply a single patch on `acting`'s document, broadcast the resulting
-/// WireDelta(s) to every other document, and — if `acting == target` —
-/// record per-op timings into `samples`. Returns the total *timed*
-/// nanoseconds spent inside `ins`/`del` for this patch. Bounds check, utf16
-/// fallback, `ins` payload clone, and the broadcast to peers are all outside
-/// the timed region.
+/// Apply a single patch on `acting`'s document, TIMED, and broadcast to
+/// every other document (untimed).
 fn apply_patch_timed(
     docs: &mut [Document],
     acting: usize,
-    target: usize,
     txn_idx: usize,
     patch: &Patch,
-    samples: &mut Vec<u128>,
-) -> Result<u128, String> {
+    samples: &mut AgentSamples,
+) -> Result<(), String> {
     let pos_utf16 = patch.0;
     let del_len_utf16 = patch.1;
     let ins = &patch.2;
@@ -395,66 +368,39 @@ fn apply_patch_timed(
         converted_from_utf16 = true;
     }
 
-    let is_target = acting == target;
-    let mut total_ns = 0u128;
-
     if del_len > 0 {
         if pos > doc_size_before || to > doc_size_before {
             return Err(format!(
                 "invalid delete range in txn {}: {}..{} while doc size is {} (raw utf16 {}..{}, utf16_conversion_attempted={})",
-                txn_idx,
-                pos,
-                to,
-                doc_size_before,
-                pos_utf16,
-                pos_utf16.saturating_add(del_len_utf16),
-                converted_from_utf16
+                txn_idx, pos, to, doc_size_before,
+                pos_utf16, pos_utf16.saturating_add(del_len_utf16), converted_from_utf16
             ));
         }
-        let op = if is_target {
-            let start = Instant::now();
-            let op = docs[acting].del(pos, to);
-            let elapsed = start.elapsed().as_nanos();
-            samples.push(elapsed);
-            total_ns += elapsed;
-            op
-        } else {
-            docs[acting].del(pos, to)
-        };
-        // Broadcast (untimed).
+        let start = Instant::now();
+        let op = docs[acting].del(pos, to);
+        samples.record(start.elapsed().as_nanos());
+
         for (i, other) in docs.iter_mut().enumerate() {
-            if i == acting {
-                continue;
-            }
+            if i == acting { continue; }
             other.apply_remote_op(&op);
         }
     }
 
     if !ins.is_empty() {
-        let text = ins.clone(); // outside timer
-        let op = if is_target {
-            let start = Instant::now();
-            let op = docs[acting].ins(pos, text);
-            let elapsed = start.elapsed().as_nanos();
-            samples.push(elapsed);
-            total_ns += elapsed;
-            op
-        } else {
-            docs[acting].ins(pos, text)
-        };
-        // `ins` returns None only for empty text, which we've already
-        // excluded above. Broadcast the resulting delta to every peer.
+        let text = ins.clone();
+        let start = Instant::now();
+        let op = docs[acting].ins(pos, text);
+        samples.record(start.elapsed().as_nanos());
+
         if let Some(op) = op {
             for (i, other) in docs.iter_mut().enumerate() {
-                if i == acting {
-                    continue;
-                }
+                if i == acting { continue; }
                 other.apply_remote_op(&op);
             }
         }
     }
 
-    Ok(total_ns)
+    Ok(())
 }
 
 fn utf16_to_char_index(text: &str, utf16_index: usize) -> usize {
@@ -462,9 +408,7 @@ fn utf16_to_char_index(text: &str, utf16_index: usize) -> usize {
     let mut char_count = 0usize;
     for ch in text.chars() {
         let next = utf16_count + ch.len_utf16();
-        if next > utf16_index {
-            break;
-        }
+        if next > utf16_index { break; }
         utf16_count = next;
         char_count += 1;
     }
@@ -475,29 +419,22 @@ fn schedule_txns(trace: &TraceFile) -> Result<Vec<usize>, String> {
     let n = trace.txns.len();
     let mut in_degree = vec![0usize; n];
     let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
-
     for (idx, txn) in trace.txns.iter().enumerate() {
         for &parent in &txn.parents {
             if parent >= n {
-                return Err(format!(
-                    "txn {} references parent {} out of bounds (len={})",
-                    idx, parent, n
-                ));
+                return Err(format!("txn {} references parent {} out of bounds (len={})", idx, parent, n));
             }
             in_degree[idx] += 1;
             dependents[parent].push(idx);
         }
     }
-
     let mut queue: VecDeque<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
     let mut order = Vec::with_capacity(n);
     while let Some(idx) = queue.pop_front() {
         order.push(idx);
         for &dep in &dependents[idx] {
             in_degree[dep] -= 1;
-            if in_degree[dep] == 0 {
-                queue.push_back(dep);
-            }
+            if in_degree[dep] == 0 { queue.push_back(dep); }
         }
     }
     if order.len() != n {
@@ -508,27 +445,16 @@ fn schedule_txns(trace: &TraceFile) -> Result<Vec<usize>, String> {
 
 fn compute_stats(samples: &[u128]) -> SampleStats {
     if samples.is_empty() {
-        return SampleStats {
-            count: 0,
-            total_ms: 0.0,
-            min_ms: 0.0,
-            max_ms: 0.0,
-            mean_ms: 0.0,
-            median_ms: 0.0,
-            p95_ms: 0.0,
-            p99_ms: 0.0,
-        };
+        return SampleStats { count: 0, total_ms: 0.0, min_ms: 0.0, max_ms: 0.0,
+            mean_ms: 0.0, median_ms: 0.0, p95_ms: 0.0, p99_ms: 0.0 };
     }
     let mut sorted: Vec<u128> = samples.to_vec();
     sorted.sort_unstable();
-
     let count = sorted.len();
     let total_ns: u128 = sorted.iter().sum();
     let ns_to_ms = |ns: u128| (ns as f64) / 1_000_000.0;
-
     let p95_idx = ((count as f64) * 0.95) as usize;
     let p99_idx = ((count as f64) * 0.99) as usize;
-
     SampleStats {
         count,
         total_ms: ns_to_ms(total_ns),
@@ -546,87 +472,43 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut mode: Option<Mode> = None;
     let mut output: Option<PathBuf> = None;
     let mut include_samples = true;
-    let mut target: Option<TargetSpec> = None;
+    let mut target_agent: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
-            "--input" => {
-                i += 1;
-                input = Some(PathBuf::from(args.get(i).ok_or("--input needs a value")?));
-            }
-            "--mode" => {
-                i += 1;
-                let m = args.get(i).ok_or("--mode needs a value")?;
-                mode = Some(parse_mode(m)?);
-            }
-            "--output" => {
-                i += 1;
-                output = Some(PathBuf::from(args.get(i).ok_or("--output needs a value")?));
-            }
-            "--no-samples" => {
-                include_samples = false;
-            }
-            "--samples" => {
-                include_samples = true;
-            }
+            "--input" => { i += 1; input = Some(PathBuf::from(args.get(i).ok_or("--input needs a value")?)); }
+            "--mode" => { i += 1; let m = args.get(i).ok_or("--mode needs a value")?; mode = Some(parse_mode(m)?); }
+            "--output" => { i += 1; output = Some(PathBuf::from(args.get(i).ok_or("--output needs a value")?)); }
+            "--no-samples" => { include_samples = false; }
+            "--samples" => { include_samples = true; }
             "--target-agent" => {
                 i += 1;
                 let raw = args.get(i).ok_or("--target-agent needs a value")?;
-                let a: usize = raw
-                    .parse()
-                    .map_err(|e| format!("invalid --target-agent {raw}: {e}"))?;
-                target = Some(TargetSpec::Agent(a));
+                target_agent = Some(raw.parse().map_err(|e| format!("invalid --target-agent {raw}: {e}"))?);
             }
-            "--all-agents" => {
-                target = Some(TargetSpec::AllAgents);
-            }
-            "-h" | "--help" => {
-                print_usage();
-                std::process::exit(0);
-            }
+            "-h" | "--help" => { print_usage(); std::process::exit(0); }
             _ => return Err(format!("unknown arg: {a}")),
         }
         i += 1;
     }
-
-    let input = input.ok_or("--input is required")?;
-    let mode = mode.ok_or("--mode is required (per-op | per-txn)")?;
-    let output = output.unwrap_or_else(|| PathBuf::from("results/local_bench.json"));
-    let target = target.unwrap_or(TargetSpec::Agent(0));
-
     Ok(Config {
-        input,
-        mode,
-        output,
+        input: input.ok_or("--input is required")?,
+        mode: mode.ok_or("--mode is required (per-op | per-txn)")?,
+        output: output.unwrap_or_else(|| PathBuf::from("results/local_bench.json")),
         include_samples,
-        target,
+        target_agent,
     })
 }
 
 fn parse_mode(raw: &str) -> Result<Mode, String> {
-    match raw {
-        "per-op" => Ok(Mode::PerOp),
-        "per-txn" => Ok(Mode::PerTxn),
-        _ => Err(format!("invalid mode {raw} (expected per-op|per-txn)")),
-    }
+    match raw { "per-op" => Ok(Mode::PerOp), "per-txn" => Ok(Mode::PerTxn),
+        _ => Err(format!("invalid mode {raw} (expected per-op|per-txn)")) }
 }
-
 fn mode_name(m: Mode) -> &'static str {
-    match m {
-        Mode::PerOp => "per-op",
-        Mode::PerTxn => "per-txn",
-    }
+    match m { Mode::PerOp => "per-op", Mode::PerTxn => "per-txn" }
 }
-
 fn print_usage() {
-    eprintln!(
-        "local_bench \
-  --input <trace.json> \
-  --mode per-op|per-txn \
-  [--target-agent N | --all-agents] \
-  [--output results/local_bench.json] \
-  [--no-samples]"
-    );
+    eprintln!("local_bench --input <trace.json> --mode per-op|per-txn [--target-agent N] [--output path.json] [--no-samples]");
 }
