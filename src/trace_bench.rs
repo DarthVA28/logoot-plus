@@ -69,6 +69,14 @@ pub struct RssStats {
     pub end_bytes: Option<u64>,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TraceAllocStats {
+    /// Peak heap bytes above baseline during the merge.
+    pub peak_bytes: usize,
+    /// Steady-state heap bytes above baseline after the merge completes.
+    pub steady_state_bytes: usize,
+}
+
 pub fn load_trace_file(path: &Path) -> Result<TraceFile, String> {
     let bytes = fs::read(path).map_err(|e| format!("failed to read trace file {}: {e}", path.display()))?;
     serde_json::from_slice::<TraceFile>(&bytes)
@@ -458,6 +466,40 @@ pub fn measure_merge_rss(generated: &GeneratedTrace, target: usize) -> Result<(R
             start_bytes: start,
             peak_bytes: peak,
             end_bytes: end,
+        },
+        check,
+    ))
+}
+
+/// Measure peak and steady-state heap usage for a merge using the tracing
+/// allocator.  Requires the binary to be compiled with `--features mem-trace`
+/// so that `TracingAlloc` is installed as the global allocator; otherwise the
+/// counters will read zero.
+pub fn measure_merge_trace_alloc(
+    generated: &GeneratedTrace,
+    target: usize,
+) -> Result<(TraceAllocStats, ContentCheck), String> {
+    validate_target(generated, target)?;
+
+    let (peak, steady, mut doc) = crate::trace_alloc::measure_memusage(|| {
+        let mut doc = build_local_state(generated, target).expect("build_local_state failed");
+        for op in &generated.remote_ops[target] {
+            doc.apply_remote_op(op);
+        }
+        doc
+    });
+
+    let observed = doc.read();
+    let check = ContentCheck {
+        expected_end_content: generated.trace.end_content.clone(),
+        matches: observed == generated.trace.end_content,
+        observed_content: observed,
+    };
+
+    Ok((
+        TraceAllocStats {
+            peak_bytes: peak,
+            steady_state_bytes: steady,
         },
         check,
     ))

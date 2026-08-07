@@ -21,6 +21,7 @@ btree_experiment = "0.1"
 [features]
 default = []
 mem-heap = ["dep:dhat"]
+mem-trace = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

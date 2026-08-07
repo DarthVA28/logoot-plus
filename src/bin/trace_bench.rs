@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use logoot_plus::trace_bench::{
-    ContentCheck, RssStats, TimingStats, TraceStats, generate_operations_for_targets_with_checks,
-    load_trace_file, measure_merge_rss, merge_remote_cpu_timed_once, reload_from_disk_cpu_once,
+    ContentCheck, RssStats, TimingStats, TraceAllocStats, TraceStats,
+    generate_operations_for_targets_with_checks, load_trace_file, measure_merge_rss,
+    measure_merge_trace_alloc, merge_remote_cpu_timed_once, reload_from_disk_cpu_once,
     write_oplog,
 };
 
-#[cfg(feature = "mem-heap")]
+// mem-heap and mem-trace are mutually exclusive (only one #[global_allocator]).
+// When mem-trace is active, TracingAlloc is installed from the lib crate.
+#[cfg(all(feature = "mem-heap", not(feature = "mem-trace")))]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
@@ -19,6 +22,7 @@ enum Mode {
     ReloadTime,
     MemRss,
     MemHeap,
+    MemTrace,
     All,
 }
 
@@ -56,6 +60,7 @@ struct TargetResult {
     reload_time: Option<TimingStats>,
     mem_rss: Option<RssStats>,
     mem_heap: Option<HeapStats>,
+    mem_trace: Option<TraceAllocStats>,
     content_check: Option<ContentCheck>,
 }
 
@@ -148,6 +153,7 @@ fn main() {
             reload_time: None,
             mem_rss: None,
             mem_heap: None,
+            mem_trace: None,
             content_check: None,
         };
 
@@ -219,6 +225,21 @@ fn main() {
 
         if matches!(config.mode, Mode::MemHeap | Mode::All) {
             result.mem_heap = Some(heap_result(config.mode));
+        }
+
+        if matches!(config.mode, Mode::MemTrace | Mode::All) {
+            match measure_merge_trace_alloc(&generated, target) {
+                Ok((stats, check)) => {
+                    result.mem_trace = Some(stats);
+                    if result.content_check.is_none() {
+                        result.content_check = Some(check);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("mem-trace failed for target {target}: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
 
         // if let Some(check) = &result.content_check
@@ -364,6 +385,7 @@ fn parse_mode(raw: &str) -> Result<Mode, String> {
         "reload-time" => Ok(Mode::ReloadTime),
         "mem-rss" => Ok(Mode::MemRss),
         "mem-heap" => Ok(Mode::MemHeap),
+        "mem-trace" => Ok(Mode::MemTrace),
         "all" => Ok(Mode::All),
         _ => Err(format!("invalid mode {raw}")),
     }
@@ -375,6 +397,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::ReloadTime => "reload-time",
         Mode::MemRss => "mem-rss",
         Mode::MemHeap => "mem-heap",
+        Mode::MemTrace => "mem-trace",
         Mode::All => "all",
     }
 }
@@ -423,7 +446,7 @@ fn print_usage() {
     eprintln!(
         "trace_bench \
   --input <trace.json> \
-  [--mode merge-time|reload-time|mem-rss|mem-heap|all] \
+  [--mode merge-time|reload-time|mem-rss|mem-heap|mem-trace|all] \
   [--iterations N] \
     [--check-every N] \
   [--target all|INDEX] \
